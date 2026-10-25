@@ -1,0 +1,27 @@
+{
+  "author": "TamTunnel",
+  "bin": {
+    "agentarb-server": "./dist/index.js"
+  },
+  "dependencies": {
+    "@tamtunnel/agentarb-core": "^0.1.0",
+    "@tamtunnel/si-wallet-core": "^0.1.0",
+    "ajv": "^8.17.1",
+    "better-sqlite3": "^12.0.0",
+    "fastify": "^5.0.0"
+  },
+  "description": "AgentArb arbiter service: Fastify API, SQLite case store, verdict-gated escrow ledger, human escalation, read-only case viewer.",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "name": "@tamtunnel/agentarb-server",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TamTunnel/agentarb.git",
+    "directory": "packages/server"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "author": "TamTunnel",
+  "description": "AgentArb core: evidence bundle format, JCS canonicalization, Ed25519 did:key JWS, trust tiers, JSONLogic rules engine, verdicts. Zero runtime dependencies, no I/O.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "name": "@tamtunnel/agentarb-core",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TamTunnel/agentarb.git",
+    "directory": "packages/core"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

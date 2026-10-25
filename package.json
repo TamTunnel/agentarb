@@ -1,0 +1,21 @@
+{
+  "description": "AgentArb — small-claims court for agent commerce: signed evidence bundles, deterministic rules, verdict-gated escrow",
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  },
+  "license": "Apache-2.0",
+  "name": "@tamtunnel/agentarb-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "npm run build -w @tamtunnel/agentarb-core && npm run build -w @tamtunnel/agentarb-server && npm run build -w @tamtunnel/agentarb-cli",
+    "test": "npm run build --workspaces --if-present && node --test \"packages/core/test/*.test.ts\" \"packages/server/test/*.test.ts\" \"packages/cli/test/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*"
+  ]
+}

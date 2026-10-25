@@ -1,0 +1,23 @@
+{
+  "author": "TamTunnel",
+  "bin": {
+    "agentarb": "./dist/index.js"
+  },
+  "dependencies": {
+    "@tamtunnel/agentarb-core": "^0.1.0"
+  },
+  "description": "AgentArb CLI: bundle, submit, verify, verdict. Offline verification of bundles and verdicts is first-class.",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "name": "@tamtunnel/agentarb-cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TamTunnel/agentarb.git",
+    "directory": "packages/cli"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}
