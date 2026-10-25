@@ -15,6 +15,7 @@
 // escrow in v1 (documented limitation).
 
 import Database from "better-sqlite3";
+import fs from "node:fs";
 import { canonicalize } from "@tamtunnel/agentarb-core";
 
 export type CaseStatus = "open" | "adjudicated" | "escalated" | "resolved";
@@ -154,13 +155,47 @@ export class Store {
         case_id TEXT NOT NULL,
         claim_index INTEGER NOT NULL,
         applied_refund_minor INTEGER NOT NULL,
+        cumulative_refund_minor INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (case_id, claim_index)
       );
     `);
+    // Migration for databases created before cumulative_refund_minor
+    // existed: the column tracks cash actually refunded per claim and is
+    // never reset by a reject (see escrow.ts) — without it, a
+    // refund → reject → refund sequence could pay a claim twice.
+    const cols = this.db.pragma("table_info(claim_escrow)") as Array<{
+      name: string;
+    }>;
+    if (!cols.some((c) => c.name === "cumulative_refund_minor")) {
+      this.db.exec(
+        "ALTER TABLE claim_escrow ADD COLUMN cumulative_refund_minor INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    // The database holds arbiter private keys: tighten file modes so a
+    // local user cannot read them. Sidecars are created by the schema
+    // writes above; missing files (e.g. :memory:) are skipped.
+    if (path !== ":memory:") {
+      for (const f of [path, `${path}-wal`, `${path}-shm`]) {
+        try {
+          fs.chmodSync(f, 0o600);
+        } catch {
+          // File does not exist yet — nothing to tighten.
+        }
+      }
+    }
   }
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Run fn inside a single SQLite transaction. Any throw rolls every
+   * write in fn back — this is what makes adjudication atomic: a
+   * mid-loop failure cannot strand partial verdicts or moved escrow.
+   */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
   }
 
   // ------------------------------------------------------------- cases
@@ -335,6 +370,31 @@ export class Store {
         "INSERT INTO claim_escrow (case_id, claim_index, applied_refund_minor) VALUES (?, ?, ?) ON CONFLICT(case_id, claim_index) DO UPDATE SET applied_refund_minor = ?",
       )
       .run(caseId, claimIndex, amount, amount);
+  }
+
+  /**
+   * Cash actually refunded for this claim across ALL verdicts, including
+   * across rejects. Never decreases, never reset by a reject — it is the
+   * cap that stops refund → reject → refund from paying a claim twice.
+   */
+  getCumulativeRefund(caseId: string, claimIndex: number): number {
+    const row = this.db
+      .prepare(
+        "SELECT cumulative_refund_minor FROM claim_escrow WHERE case_id = ? AND claim_index = ?",
+      )
+      .get(caseId, claimIndex) as
+      | { cumulative_refund_minor: number }
+      | undefined;
+    return row ? row.cumulative_refund_minor : 0;
+  }
+
+  addCumulativeRefund(caseId: string, claimIndex: number, amount: number): void {
+    if (amount === 0) return;
+    this.db
+      .prepare(
+        "INSERT INTO claim_escrow (case_id, claim_index, applied_refund_minor, cumulative_refund_minor) VALUES (?, ?, 0, ?) ON CONFLICT(case_id, claim_index) DO UPDATE SET cumulative_refund_minor = cumulative_refund_minor + excluded.cumulative_refund_minor",
+      )
+      .run(caseId, claimIndex, amount);
   }
 
   // -------------------------------------------------------- revocations

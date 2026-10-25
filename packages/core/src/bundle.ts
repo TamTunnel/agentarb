@@ -16,8 +16,10 @@
 // is never silently downgraded.
 //
 // Evidence trust tiers (highest first):
-//   3 counterparty-signed — signed by a party to the dispute who did NOT
-//     submit the item (an admission against interest).
+//   3 counterparty-signed — submitted by one party and signed by the
+//     other party (an admission against interest). A party-signed item
+//     submitted by a third party is NOT tier 3 — the admission structure
+//     requires the other party to be the submitter.
 //   2 third-party-oracle-signed — signed by someone who is not a party.
 //   1 self-signed — signed by the submitter themselves.
 //   0 unsigned — no signature claim at all.
@@ -25,7 +27,7 @@
 // a minimum tier (see MIN_TIER_FOR_CLAIM_TYPE). Items below the minimum
 // are excluded from evaluation and recorded in the trace.
 
-import { canonicalize, canonicalHashSync } from "./jcs.js";
+import { canonicalize, canonicalHashSync, CanonicalizationError } from "./jcs.js";
 import { isDidKey } from "./did.js";
 import { signJws, verifyJws, type Ed25519Jwk } from "./jws.js";
 import { isMinorUnits } from "./money.js";
@@ -204,7 +206,7 @@ function isSha256Hex(s: unknown): s is string {
   return typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 }
 
-function isHttpUrl(s: unknown): s is string {
+export function isHttpUrl(s: unknown): s is string {
   if (typeof s !== "string") return false;
   try {
     const u = new URL(s);
@@ -310,6 +312,31 @@ export function validateBundlePayload(
         }
       }
     });
+    // Cap the SUM of claims at the transaction amount, not just each claim
+    // individually: two claims on contradictory theories of the same loss
+    // (e.g. non-delivery refund_full plus wrong-partial refund_partial)
+    // must never pay out more than the transaction itself.
+    if (typeof txAmount === "number") {
+      let sum = 0;
+      let allAmountsValid = true;
+      for (const c of p.claims as unknown[]) {
+        if (
+          c !== null &&
+          typeof c === "object" &&
+          !Array.isArray(c) &&
+          isMinorUnits((c as Record<string, unknown>).amount_minor)
+        ) {
+          sum += (c as Record<string, unknown>).amount_minor as number;
+        } else {
+          allAmountsValid = false;
+        }
+      }
+      if (allAmountsValid && sum > txAmount) {
+        errors.push(
+          `sum of claim amounts (${sum}) must not exceed transaction.amount_minor (${txAmount})`,
+        );
+      }
+    }
   }
 
   if (!Array.isArray(p.evidence)) {
@@ -405,19 +432,38 @@ export function verifyEvidenceItem(
       tierName: null,
     };
   }
-  if (canonicalize(v.payload) !== canonicalize(evidenceSignPayload(item))) {
+  let covers: boolean;
+  try {
+    covers = canonicalize(v.payload) === canonicalize(evidenceSignPayload(item));
+  } catch (e) {
+    if (e instanceof CanonicalizationError || e instanceof RangeError) {
+      return {
+        ok: false,
+        errors: [`evidence ${item.id}: item cannot be canonicalized (${(e as Error).message})`],
+        tier: null,
+        tierName: null,
+      };
+    }
+    throw e;
+  }
+  if (!covers) {
     return {
       ok: false,
       errors: [`evidence ${item.id}: signature does not cover this item`],
       tier: null,
       tierName: null,
     };
-  }
-  const signer = item.signer;
+  }  const signer = item.signer;
   let tier: EvidenceTier;
   if (signer === item.submitted_by) {
     tier = 1;
-  } else if (signer === claimant || signer === respondent) {
+  } else if (
+    (item.submitted_by === claimant && signer === respondent) ||
+    (item.submitted_by === respondent && signer === claimant)
+  ) {
+    // Tier 3 requires the admission structure: one party submits, the
+    // other party signed. A party-signed item submitted by a third party
+    // is tier 2 — independently signed, but not an admission.
     tier = 3;
   } else {
     tier = 2;
@@ -461,7 +507,21 @@ export function verifyBundle(
     errors.push("signatures must be a non-empty array");
   }
   const payload = bundlePayload(b);
-  const expectedCanonical = canonicalize(payload);
+  let expectedCanonical: string;
+  try {
+    expectedCanonical = canonicalize(payload);
+  } catch (e) {
+    if (e instanceof CanonicalizationError || e instanceof RangeError) {
+      return {
+        ok: false,
+        errors: [`bundle payload cannot be canonicalized (${(e as Error).message})`],
+        hash: null,
+        signers: [],
+        evidence: [],
+      };
+    }
+    throw e;
+  }
   const signers: string[] = [];
   if (Array.isArray(b.signatures)) {
     for (let i = 0; i < b.signatures.length; i++) {
@@ -475,7 +535,17 @@ export function verifyBundle(
         errors.push(`signatures[${i}] (${sig.signer}): ${v.reason}`);
         continue;
       }
-      if (canonicalize(v.payload) !== expectedCanonical) {
+      let covers: boolean;
+      try {
+        covers = canonicalize(v.payload) === expectedCanonical;
+      } catch (e) {
+        if (e instanceof CanonicalizationError || e instanceof RangeError) {
+          errors.push(`signatures[${i}] cannot be canonicalized (${(e as Error).message})`);
+          continue;
+        }
+        throw e;
+      }
+      if (!covers) {
         errors.push(`signatures[${i}] does not sign this bundle payload`);
         continue;
       }

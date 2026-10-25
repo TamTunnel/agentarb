@@ -22,7 +22,9 @@
 // plus the trace and evidence split, so the caller can sign and store it.
 
 import {
+  bundlePayload,
   filterEvidenceForClaim,
+  validateBundlePayload,
   verifyBundle,
   type Bundle,
   type Claim,
@@ -214,6 +216,46 @@ export function adjudicateClaim(
   arbiterDid: string,
   now: Date = new Date(),
 ): Adjudication {
+  const verified = verifyBundle(bundle);
+  if (!verified.ok) {
+    throw new Error(
+      `cannot adjudicate unverified bundle: ${verified.errors.join("; ")}`,
+    );
+  }
+  return adjudicateClaimWithEvidence(
+    bundle,
+    claimIndex,
+    ruleset,
+    caseId,
+    arbiterDid,
+    verified.evidence,
+    verified.hash as string,
+    now,
+  );
+}
+
+/**
+ * Adjudicate one claim given pre-verified evidence and the bundle hash to
+ * cite. The caller guarantees the evidence signatures and tiers (the
+ * server re-verifies each stored item individually) and the bundle hash
+ * (the stored case's hash). The bundle payload itself is still
+ * structurally validated here, and the claim/ruleset match is checked —
+ * only the envelope-signature re-check is the caller's job. This exists
+ * because a case's evidence set grows after submission: the claimant's
+ * envelope signature covers the ORIGINAL payload, so re-checking it
+ * against the rebuilt payload would fail every re-adjudication that
+ * follows an evidence addition.
+ */
+export function adjudicateClaimWithEvidence(
+  bundle: Bundle,
+  claimIndex: number,
+  ruleset: SignedRuleset,
+  caseId: string,
+  arbiterDid: string,
+  verifiedEvidence: VerifiedEvidence[],
+  bundleHashValue: string,
+  now: Date = new Date(),
+): Adjudication {
   const claim = bundle.claims[claimIndex];
   if (!claim) {
     throw new Error(`claim index ${claimIndex} out of range`);
@@ -223,14 +265,14 @@ export function adjudicateClaim(
       `rule set ${ruleset.id} covers ${ruleset.claim_type}, not ${claim.type}`,
     );
   }
-  const verified = verifyBundle(bundle);
-  if (!verified.ok) {
+  const structural = validateBundlePayload(bundlePayload(bundle));
+  if (structural.length > 0) {
     throw new Error(
-      `cannot adjudicate unverified bundle: ${verified.errors.join("; ")}`,
+      `cannot adjudicate invalid bundle: ${structural.join("; ")}`,
     );
   }
   const { admitted, excluded } = filterEvidenceForClaim(
-    verified.evidence,
+    verifiedEvidence,
     claim.type,
   );
   const context = buildContext(bundle, claim, admitted, now);
@@ -300,7 +342,7 @@ export function adjudicateClaim(
     version: 1 as const,
     case_id: caseId,
     bundle_id: bundle.id,
-    bundle_hash: verified.hash as string,
+    bundle_hash: bundleHashValue,
     ruleset_id: ruleset.id,
     ruleset_version: ruleset.version,
     ruleset_hash: ruleset.hash,

@@ -26,7 +26,7 @@
 // separately — a revoked verdict still verifies cryptographically, but
 // must be treated as void by any consumer.
 
-import { canonicalize, canonicalHashSync } from "./jcs.js";
+import { canonicalize, canonicalHashSync, CanonicalizationError } from "./jcs.js";
 import { isDidKey } from "./did.js";
 import { signJws, verifyJws, type Ed25519Jwk } from "./jws.js";
 import { isMinorUnits } from "./money.js";
@@ -176,7 +176,7 @@ export function validateVerdict(v: unknown): string[] {
       errors.push("rules verdicts must cite a 64-hex ruleset_hash");
     }
   }
-  if (d.method === "human" && (d.ruleset_id !== undefined || d.ruleset_hash !== undefined)) {
+  if (d.method === "human" && (d.ruleset_id !== undefined || d.ruleset_hash !== undefined || d.ruleset_version !== undefined)) {
     errors.push("human verdicts must not cite a rule set");
   }
   if (d.signature !== undefined && d.signature !== null && typeof d.signature !== "string") {
@@ -216,7 +216,18 @@ export function verifyVerdict(
     errors.push(`signature invalid (${verified.reason})`);
     return { ok: false, errors };
   }
-  if (canonicalize(verified.payload) !== canonicalize(verdictSignPayload(v))) {
+  let covers: boolean;
+  try {
+    covers =
+      canonicalize(verified.payload) === canonicalize(verdictSignPayload(v));
+  } catch (e) {
+    if (e instanceof CanonicalizationError || e instanceof RangeError) {
+      errors.push(`verdict cannot be canonicalized (${(e as Error).message})`);
+      return { ok: false, errors };
+    }
+    throw e;
+  }
+  if (!covers) {
     errors.push("signature does not cover this verdict");
   }
   return { ok: errors.length === 0, errors };

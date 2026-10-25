@@ -112,8 +112,14 @@ function readJson(file: string): unknown {
 }
 
 function writeJson(file: string, value: unknown, mode?: number): void {
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
-  if (mode !== undefined) fs.chmodSync(file, mode);
+  const content = JSON.stringify(value, null, 2) + "\n";
+  if (mode !== undefined) {
+    // Set the mode at creation: write-then-chmod leaves the file briefly
+    // readable at the default mode, which matters for key material.
+    fs.writeFileSync(file, content, { mode });
+  } else {
+    fs.writeFileSync(file, content);
+  }
 }
 
 function loadPrivateKey(keyfile: string): Ed25519Jwk {
@@ -155,6 +161,9 @@ function printVerdictReport(verdict: unknown, trusted?: string[]): boolean {
   }
   const d = verdict as Record<string, unknown>;
   console.log("VALID verdict");
+  if (!trusted) {
+    console.log("  note: no --trusted set given, so the arbiter is not checked against any trust set");
+  }
   console.log(`  id:       ${d.id}`);
   console.log(`  method:   ${d.method}`);
   console.log(`  outcome:  ${d.outcome}`);

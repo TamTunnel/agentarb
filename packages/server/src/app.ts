@@ -16,11 +16,12 @@
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { randomUUID } from "node:crypto";
 import {
-  adjudicateClaim,
+  adjudicateClaimWithEvidence,
   BUNDLE_SCHEMA,
   builtinRulesetFor,
   generateKeypair,
   isDidKey,
+  isHttpUrl,
   isMinorUnits,
   signRevocation,
   signVerdict,
@@ -28,13 +29,16 @@ import {
   validateBundlePayload,
   validateVerdict,
   VERDICT_SCHEMA,
+  verdictIdFor,
   verifyBundle,
   verifyEvidenceItem,
   verifyVerdict,
+  verdictSignPayload,
   type Bundle,
   type Ed25519Jwk,
   type EvidenceItem,
   type Verdict,
+  type VerifiedEvidence,
 } from "@tamtunnel/agentarb-core";
 import { Store, type CaseStatus } from "./store.js";
 import { applyVerdictToEscrow, checkMandateForHold } from "./escrow.js";
@@ -137,10 +141,14 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       }
       const caseId = "case_" + randomUUID();
       const now = nowIso();
-      store.createCase(caseId, b, verified.hash as string, now);
-      for (const ev of verified.evidence) {
-        store.addEvidence(caseId, ev.item.id, ev.item, ev.tier, now);
-      }
+      // Case + evidence are one unit: a failure partway must not leave a
+      // case missing evidence.
+      store.transaction(() => {
+        store.createCase(caseId, b, verified.hash as string, now);
+        for (const ev of verified.evidence) {
+          store.addEvidence(caseId, ev.item.id, ev.item, ev.tier, now);
+        }
+      });
       return reply.status(201).send({
         case_id: caseId,
         bundle_hash: verified.hash,
@@ -218,6 +226,9 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       if (evidence.sha256 != null && !/^[0-9a-f]{64}$/.test(evidence.sha256)) {
         return bad(reply, 400, "evidence.sha256 must be a 64-hex-character digest");
       }
+      if (evidence.uri != null && !isHttpUrl(evidence.uri)) {
+        return bad(reply, 400, "evidence.uri must be an http(s) URL");
+      }
       // Reuse the bundle validator for the single item by checking the
       // item's shape fields directly.
       if (!evidence.content && !evidence.sha256 && !evidence.uri) {
@@ -276,56 +287,88 @@ export function createApp(opts: ServerOptions): FastifyInstance {
         now = parsed;
       }
       const bundle = JSON.parse(row.bundle_json) as Bundle;
-      // Rebuild the bundle with its stored (verified) evidence so the
-      // engine sees exactly what the case holds, including later additions.
-      const storedEvidence = store.getEvidence(id).map((r) => JSON.parse(r.evidence_json));
-      const fullBundle: Bundle = { ...bundle, evidence: storedEvidence };
+      // Guard: the stored envelope must still verify as the claimant
+      // signed it. Evidence added after submission is NOT part of that
+      // envelope, so each stored item is re-verified individually below
+      // (fresh tiers under current logic) instead of re-checking the
+      // envelope against the rebuilt payload — which would fail every
+      // re-adjudication following an evidence addition.
+      const origVerified = verifyBundle(bundle);
+      if (!origVerified.ok) {
+        return bad(reply, 400, "stored bundle no longer verifies", origVerified.errors);
+      }
+      const verifiedEvidence: VerifiedEvidence[] = [];
+      for (const r of store.getEvidence(id)) {
+        const item = JSON.parse(r.evidence_json) as EvidenceItem;
+        const v = verifyEvidenceItem(item, bundle.claimant, bundle.respondent);
+        if (!v.ok) {
+          return bad(reply, 400, "stored evidence no longer verifies", v.errors);
+        }
+        verifiedEvidence.push({
+          item,
+          tier: v.tier as 0 | 1 | 2 | 3,
+          tierName: v.tierName as string,
+        });
+      }
+      const fullBundle: Bundle = {
+        ...bundle,
+        evidence: verifiedEvidence.map((e) => e.item),
+      };
       const arbiter = ensureArbiterKey();
       const nowIsoStr = nowIso();
       const verdicts: Verdict[] = [];
       const escrowEffects: unknown[] = [];
       let anyEscalate = false;
       try {
-        for (let i = 0; i < bundle.claims.length; i++) {
-          const claim = bundle.claims[i];
-          const ruleset = builtinRulesetFor(claim.type);
-          const { verdict } = adjudicateClaim(
-            fullBundle,
-            i,
-            ruleset,
-            id,
-            arbiter.did,
-            now,
-          );
-          const signed = signVerdict(verdict, arbiter.privateJwk);
-          store.saveVerdict(
-            signed.id,
-            id,
-            i,
-            signed,
-            signed.method,
-            signed.outcome,
-            signed.refund_minor,
-            nowIsoStr,
-          );
-          const effects = applyVerdictToEscrow(
-            store,
-            id,
-            i,
-            signed.id,
-            signed.outcome,
-            signed.refund_minor,
-            nowIsoStr,
-          );
-          escrowEffects.push(...effects);
-          if (signed.outcome === "escalate") anyEscalate = true;
-          verdicts.push(signed);
-        }
+        // The whole loop is one transaction: a failure on any claim
+        // rolls back every verdict, escrow effect, and status change, so
+        // a retry cannot create duplicate verdicts or double-move escrow.
+        store.transaction(() => {
+          for (let i = 0; i < bundle.claims.length; i++) {
+            const claim = bundle.claims[i];
+            const ruleset = builtinRulesetFor(claim.type);
+            const { verdict } = adjudicateClaimWithEvidence(
+              fullBundle,
+              i,
+              ruleset,
+              id,
+              arbiter.did,
+              verifiedEvidence,
+              row.bundle_hash,
+              now,
+            );
+            const signed = signVerdict(verdict, arbiter.privateJwk);
+            store.saveVerdict(
+              signed.id,
+              id,
+              i,
+              signed,
+              signed.method,
+              signed.outcome,
+              signed.refund_minor,
+              nowIsoStr,
+            );
+            const effects = applyVerdictToEscrow(
+              store,
+              id,
+              i,
+              signed.id,
+              signed.outcome,
+              signed.refund_minor,
+              nowIsoStr,
+              claim.amount_minor,
+            );
+            escrowEffects.push(...effects);
+            if (signed.outcome === "escalate") anyEscalate = true;
+            verdicts.push(signed);
+          }
+          const status: CaseStatus = anyEscalate ? "escalated" : "adjudicated";
+          store.setCaseStatus(id, status, nowIsoStr);
+        });
       } catch (e) {
         return bad(reply, 400, "adjudication failed", (e as Error).message);
       }
       const status: CaseStatus = anyEscalate ? "escalated" : "adjudicated";
-      store.setCaseStatus(id, status, nowIsoStr);
       return { case_id: id, status, verdicts, escrow: escrowEffects };
     },
   );
@@ -413,30 +456,53 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       if (verdict.currency !== bundle.transaction.currency) {
         return bad(reply, 400, "verdict currency does not match the transaction");
       }
+      if (verdict.outcome === "escalate") {
+        return bad(reply, 400, "human verdicts cannot escalate — the human is the escalation target");
+      }
+      // The verdict must cite THIS case's bundle, by content address, and
+      // must not be self-dealing: the claimant or respondent cannot sign
+      // their own "human verdict" awarding themselves a refund. The id
+      // check also stops non-content ids colliding across cases (verdict
+      // id is a global primary key — a collision would 500 on save).
+      if (verdict.bundle_hash !== row.bundle_hash) {
+        return bad(reply, 400, "verdict bundle_hash does not match the stored bundle");
+      }
+      if (verdict.id !== verdictIdFor(verdictSignPayload(verdict))) {
+        return bad(reply, 400, "verdict id is not the content address of its payload");
+      }
+      if (verdict.arbiter === bundle.claimant || verdict.arbiter === bundle.respondent) {
+        return bad(reply, 400, "human verdict arbiter must not be a party to the case");
+      }
       const v = verifyVerdict(verdict);
       if (!v.ok) {
         return bad(reply, 400, "verdict verification failed", v.errors);
       }
-      store.saveVerdict(
-        verdict.id,
-        id,
-        claim_index,
-        verdict,
-        verdict.method,
-        verdict.outcome,
-        verdict.refund_minor,
-        nowIso(),
-      );
-      const effects = applyVerdictToEscrow(
-        store,
-        id,
-        claim_index,
-        verdict.id,
-        verdict.outcome,
-        verdict.refund_minor,
-        nowIso(),
-      );
-      store.setCaseStatus(id, "resolved", nowIso());
+      // Verdict + escrow + status are one unit (same atomicity argument
+      // as adjudication).
+      const effects = store.transaction(() => {
+        store.saveVerdict(
+          verdict.id,
+          id,
+          claim_index,
+          verdict,
+          verdict.method,
+          verdict.outcome,
+          verdict.refund_minor,
+          nowIso(),
+        );
+        const fx = applyVerdictToEscrow(
+          store,
+          id,
+          claim_index,
+          verdict.id,
+          verdict.outcome,
+          verdict.refund_minor,
+          nowIso(),
+          claim.amount_minor,
+        );
+        store.setCaseStatus(id, "resolved", nowIso());
+        return fx;
+      });
       return { case_id: id, status: "resolved", verdict, escrow: effects };
     },
   );
@@ -503,6 +569,9 @@ export function createApp(opts: ServerOptions): FastifyInstance {
         };
       const row = store.getCase(case_id);
       if (!row) return bad(reply, 404, "case not found");
+      if (row.status === "resolved") {
+        return bad(reply, 409, "case is resolved; holds can no longer be added");
+      }
       const bundle = JSON.parse(row.bundle_json) as Bundle;
       const idx = claim_index ?? 0;
       if (!bundle.claims[idx]) {
@@ -514,6 +583,9 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       if (!isMinorUnits(amount_minor)) {
         return bad(reply, 400, "amount_minor must be a non-negative safe integer");
       }
+      if (amount_minor > bundle.claims[idx].amount_minor) {
+        return bad(reply, 400, "hold amount_minor must not exceed the claim amount");
+      }
       let mandateAgent: string | null = null;
       if (mandate_jws) {
         const check = checkMandateForHold(mandate_jws, amount_minor);
@@ -524,8 +596,10 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       }
       const holdId = "hold_" + randomUUID();
       const now = nowIso();
-      store.createHold(holdId, case_id, idx, amount_minor, currency, mandate_jws ?? null, mandateAgent, now);
-      store.addHoldEvent(holdId, "hold", amount_minor, null, now);
+      store.transaction(() => {
+        store.createHold(holdId, case_id, idx, amount_minor, currency, mandate_jws ?? null, mandateAgent, now);
+        store.addHoldEvent(holdId, "hold", amount_minor, null, now);
+      });
       return reply.status(201).send({
         hold_id: holdId,
         case_id,

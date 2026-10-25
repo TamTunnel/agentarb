@@ -19,7 +19,10 @@
 // between the verdict's refund and what was already applied for that
 // claim: positive deltas refund more, negative deltas release back.
 // Escalate verdicts move nothing. Reject verdicts release the remaining
-// hold (the respondent keeps it).
+// hold (the respondent keeps it). Total cash refunded per claim is capped
+// at the claim amount across ALL verdicts: a reject resets the applied
+// level but never the cumulative refunded figure, so a refund → reject →
+// new hold → refund sequence cannot pay a claim twice.
 
 import { verifyMandate } from "@tamtunnel/si-wallet-core";
 import type { Store } from "./store.js";
@@ -73,6 +76,13 @@ export function checkMandateForHold(
 /**
  * Apply one verdict's refund to a case's holds, moving only the delta
  * versus what was already applied for this claim. Returns the effects.
+ *
+ * Two figures are tracked per claim, and they mean different things:
+ *   - applied: the latest verdict's refund level (for delta math).
+ *   - cumulative: cash actually refunded across ALL verdicts. It never
+ *     decreases and a reject never resets it — so a refund → reject →
+ *     new hold → refund sequence cannot pay a claim twice. Refund
+ *     movement is capped at claimAmountMinor minus cumulative.
  */
 export function applyVerdictToEscrow(
   store: Store,
@@ -82,6 +92,7 @@ export function applyVerdictToEscrow(
   outcome: string,
   refundMinor: number,
   now: string,
+  claimAmountMinor: number,
 ): EscrowEffect[] {
   const effects: EscrowEffect[] = [];
   if (outcome === "escalate") return effects;
@@ -108,6 +119,8 @@ export function applyVerdictToEscrow(
       });
     }
     store.setAppliedRefund(caseId, claimIndex, 0);
+    // Deliberately NOT resetting the cumulative figure: money already
+    // refunded stays refunded. A later refund verdict is capped by it.
     return effects;
   }
   // refund_full / refund_partial
@@ -135,8 +148,13 @@ export function applyVerdictToEscrow(
     store.setAppliedRefund(caseId, claimIndex, refundMinor);
     return effects;
   }
-  // delta > 0: refund more, drawing from held balances.
-  let toRefund = delta;
+  // delta > 0: refund more, drawing from held balances — but never more
+  // than the claim's remaining headroom: claim amount minus cash already
+  // refunded across all verdicts (including across rejects).
+  const cumulative = store.getCumulativeRefund(caseId, claimIndex);
+  const headroom = Math.max(0, claimAmountMinor - cumulative);
+  let toRefund = Math.min(delta, headroom);
+  let refunded = 0;
   for (const hold of holds) {
     if (toRefund <= 0) break;
     const amount = Math.min(toRefund, hold.remaining_minor);
@@ -145,6 +163,7 @@ export function applyVerdictToEscrow(
     store.addHoldEvent(hold.id, "refund", amount, verdictId, now);
     store.updateHold(hold.id, remaining, remaining === 0 ? "refunded" : "held", now);
     toRefund -= amount;
+    refunded += amount;
     effects.push({
       hold_id: hold.id,
       kind: "refund",
@@ -153,6 +172,9 @@ export function applyVerdictToEscrow(
       remaining_minor: remaining,
       hold_status: remaining === 0 ? "refunded" : "held",
     });
+  }
+  if (refunded > 0) {
+    store.addCumulativeRefund(caseId, claimIndex, refunded);
   }
   // If holds did not cover the delta (e.g. no hold exists), the verdict
   // still stands — the ledger records what moved, and the shortfall is

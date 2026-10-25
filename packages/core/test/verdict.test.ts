@@ -116,3 +116,18 @@ test("revocation: sign, verify, and lookup", () => {
   const tampered = { ...entry, reason: "different" };
   assert.equal(verifyRevocation(tampered, [arbiter.did]).ok, false);
 });
+
+test("verdict: human verdict citing only ruleset_version is rejected", () => {
+  const human = {
+    ...sampleVerdict(),
+    method: "human",
+    ruleset_version: 1,
+  };
+  delete (human as Record<string, unknown>).ruleset_id;
+  delete (human as Record<string, unknown>).ruleset_hash;
+  assert.ok(
+    verifyVerdict(human as Verdict, { allowUnsigned: true }).errors.some((e) =>
+      e.includes("must not cite a rule set"),
+    ),
+  );
+});
