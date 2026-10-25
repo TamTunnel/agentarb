@@ -205,3 +205,77 @@ test("bundle: min-tier filtering per claim type", () => {
   assert.deepEqual(ld.admitted.map((e) => e.item.id), ["o"]);
   assert.deepEqual(ld.excluded.map((e) => e.id).sort(), ["s", "u"]);
 });
+
+test("bundle: sum of claims capped at transaction amount (double recovery)", () => {
+  const payload = basePayload();
+  payload.claims = [
+    { type: "non-delivery", amount_minor: 10000, details: {} },
+    {
+      type: "wrong-partial-delivery",
+      amount_minor: 3000,
+      details: { missing_minor: 3000 },
+    },
+  ];
+  // Each claim alone is within the 10000 transaction, but together they
+  // claim 13000 on contradictory theories of the same loss.
+  const errors = validateBundlePayload(payload);
+  assert.ok(
+    errors.some((e) => e.includes("sum of claim amounts")),
+    errors.join("; "),
+  );
+  // Exactly at the transaction amount is fine.
+  payload.claims = [
+    { type: "non-delivery", amount_minor: 6000, details: {} },
+    {
+      type: "wrong-partial-delivery",
+      amount_minor: 4000,
+      details: { missing_minor: 4000 },
+    },
+  ];
+  assert.deepEqual(validateBundlePayload(payload), []);
+});
+
+test("bundle: party-signed item from a third-party submitter is tier 2, not 3", () => {
+  const payload = basePayload();
+  payload.evidence = [
+    signedEvidence(
+      {
+        id: "ev-third-party-submission",
+        kind: "delivery-proof",
+        content: "admission",
+        submitted_by: oracle.did,
+      },
+      respondent,
+    ),
+  ];
+  const bundle = signedBundle(payload, [claimant]);
+  const v = verifyBundle(bundle);
+  assert.equal(v.ok, true, v.errors.join("; "));
+  // Tier 3 requires the admission structure (one party submits, the other
+  // signed). A third-party submitter breaks it, so this is tier 2.
+  assert.equal(v.evidence[0].tier, 2);
+});
+
+test("bundle: deeply nested payload fails verification, never throws", () => {
+  const payload = basePayload();
+  let deep: Record<string, unknown> = {};
+  let cursor = deep;
+  for (let i = 0; i < 2000; i++) {
+    const next: Record<string, unknown> = {};
+    cursor.nested = next;
+    cursor = next;
+  }
+  payload.claims = [
+    { type: "non-delivery", amount_minor: 10000, details: deep },
+  ];
+  const bundle = {
+    ...payload,
+    signatures: [{ signer: claimant.did, jws: "junk.junk.junk" }],
+  };
+  const v = verifyBundle(bundle);
+  assert.equal(v.ok, false);
+  assert.ok(
+    v.errors.some((e) => e.includes("depth")),
+    v.errors.join("; "),
+  );
+});

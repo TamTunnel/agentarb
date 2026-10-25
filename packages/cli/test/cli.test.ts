@@ -216,3 +216,37 @@ test("cli: submit + adjudicate + case against a live server", async () => {
     server.kill();
   }
 });
+
+test("cli: verdict verify without --trusted prints the no-trust-set caveat", () => {
+  const dir = tmpdir();
+  const arbiter = generateKeypair();
+  const verdict: Verdict = signVerdict(
+    {
+      format: "agentarb-verdict",
+      version: 1,
+      id: "v_cli_2",
+      case_id: "case-1",
+      bundle_id: "bundle-1",
+      bundle_hash: "d".repeat(64),
+      ruleset_id: "builtin/non-delivery",
+      ruleset_version: 1,
+      ruleset_hash: "e".repeat(64),
+      method: "rules",
+      outcome: "refund_full",
+      refund_minor: 10000,
+      currency: "USD",
+      claim_amount_minor: 10000,
+      reasoning: [{ rule: "r", matched: true, reason: "ok" }],
+      decided_at: "2026-10-10T00:00:00Z",
+      arbiter: arbiter.did,
+      signature: null,
+    },
+    arbiter.privateJwk,
+  );
+  const verdictPath = path.join(dir, "verdict.json");
+  fs.writeFileSync(verdictPath, JSON.stringify(verdict, null, 2));
+  const res = runCli(["verdict", "verify", "--in", verdictPath], dir);
+  assert.equal(res.code, 0, res.out);
+  assert.match(res.out, /VALID verdict/);
+  assert.match(res.out, /no --trusted set given/);
+});
