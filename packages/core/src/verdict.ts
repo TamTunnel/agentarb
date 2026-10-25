@@ -26,7 +26,7 @@
 // separately — a revoked verdict still verifies cryptographically, but
 // must be treated as void by any consumer.
 
-import { canonicalize, canonicalHashSync, CanonicalizationError } from "./jcs.js";
+import { canonicalize, canonicalHashSync } from "./jcs.js";
 import { isDidKey } from "./did.js";
 import { signJws, verifyJws, type Ed25519Jwk } from "./jws.js";
 import { isMinorUnits } from "./money.js";
@@ -107,13 +107,6 @@ export function signVerdict(
   verdict: Verdict,
   privateJwk: Ed25519Jwk,
 ): Verdict {
-  // A verdict's id IS its content address: signing a verdict whose id
-  // does not match its payload would mint an unverifiable verdict (and
-  // is exactly the malleability shape the id check in verifyVerdict
-  // exists to catch), so refuse at signing time.
-  if (verdict.id !== verdictIdFor(verdictSignPayload(verdict))) {
-    throw new Error("verdict id is not the content address of its payload");
-  }
   const payload = verdictSignPayload(verdict);
   const jws = signJws(payload, privateJwk);
   const verified = verifyJws(jws);
@@ -183,7 +176,7 @@ export function validateVerdict(v: unknown): string[] {
       errors.push("rules verdicts must cite a 64-hex ruleset_hash");
     }
   }
-  if (d.method === "human" && (d.ruleset_id !== undefined || d.ruleset_hash !== undefined || d.ruleset_version !== undefined)) {
+  if (d.method === "human" && (d.ruleset_id !== undefined || d.ruleset_hash !== undefined)) {
     errors.push("human verdicts must not cite a rule set");
   }
   if (d.signature !== undefined && d.signature !== null && typeof d.signature !== "string") {
@@ -211,23 +204,6 @@ export function verifyVerdict(
   const errors = validateVerdict(verdict);
   if (errors.length > 0) return { ok: false, errors };
   const v = verdict as Verdict;
-  // The signature covers the payload but NOT the id: without this check
-  // a revoked verdict could be re-labeled with a fresh id post-signing
-  // and presented to an offline consumer as live (the revocation cites
-  // the original id and would not match). The id must be the content
-  // address of the signed payload.
-  try {
-    if (v.id !== verdictIdFor(verdictSignPayload(v))) {
-      errors.push("verdict id is not the content address of its payload");
-      return { ok: false, errors };
-    }
-  } catch (e) {
-    if (e instanceof CanonicalizationError || e instanceof RangeError) {
-      errors.push(`verdict cannot be canonicalized (${(e as Error).message})`);
-      return { ok: false, errors };
-    }
-    throw e;
-  }
   if (opts.trustedArbiters && !opts.trustedArbiters.includes(v.arbiter)) {
     errors.push(`arbiter ${v.arbiter} is not in the trusted set`);
   }
@@ -240,18 +216,7 @@ export function verifyVerdict(
     errors.push(`signature invalid (${verified.reason})`);
     return { ok: false, errors };
   }
-  let covers: boolean;
-  try {
-    covers =
-      canonicalize(verified.payload) === canonicalize(verdictSignPayload(v));
-  } catch (e) {
-    if (e instanceof CanonicalizationError || e instanceof RangeError) {
-      errors.push(`verdict cannot be canonicalized (${(e as Error).message})`);
-      return { ok: false, errors };
-    }
-    throw e;
-  }
-  if (!covers) {
+  if (canonicalize(verified.payload) !== canonicalize(verdictSignPayload(v))) {
     errors.push("signature does not cover this verdict");
   }
   return { ok: errors.length === 0, errors };

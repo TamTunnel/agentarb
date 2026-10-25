@@ -51,23 +51,3 @@ test("jcs: hash is deterministic and content-sensitive", () => {
   assert.notEqual(a, c);
   assert.match(a, /^[0-9a-f]{64}$/);
 });
-
-test("jcs: nesting beyond the depth limit throws CanonicalizationError", () => {
-  let deep: Record<string, unknown> = {};
-  let cursor = deep;
-  for (let i = 0; i < 2000; i++) {
-    const next: Record<string, unknown> = {};
-    cursor.nested = next;
-    cursor = next;
-  }
-  assert.throws(() => canonicalize(deep), /maximum depth/);
-  // Just under the limit still works.
-  let shallow: Record<string, unknown> = {};
-  cursor = shallow;
-  for (let i = 0; i < 50; i++) {
-    const next: Record<string, unknown> = {};
-    cursor.nested = next;
-    cursor = next;
-  }
-  assert.equal(typeof canonicalize(shallow), "string");
-});

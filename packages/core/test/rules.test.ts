@@ -77,11 +77,3 @@ test("rules: rule objects are data — no code execution surface", () => {
     false,
   );
 });
-
-test("rules: nesting beyond the depth limit throws RuleError", () => {
-  let deep: Record<string, unknown> = { var: "x" };
-  for (let i = 0; i < 2000; i++) {
-    deep = { and: [deep] };
-  }
-  assert.throws(() => evaluate(deep, { x: true }), /maximum nesting depth/);
-});

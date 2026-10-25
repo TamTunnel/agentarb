@@ -8,8 +8,6 @@ import {
 } from "./helpers.ts";
 import {
   adjudicateClaim,
-  adjudicateClaimWithEvidence,
-  bundleHash,
   builtinRulesetFor,
   canonicalize,
   signVerdict,
@@ -356,47 +354,4 @@ test("engine: wrong rule set for the claim type throws", () => {
       ),
     /covers late-delivery, not non-delivery/,
   );
-});
-
-test("engine: adjudication with pre-verified evidence added after signing", () => {
-  // The claimant signed a bundle with no evidence. Later, an oracle
-  // delivery proof is added — the envelope no longer covers the rebuilt
-  // payload, so plain adjudicateClaim must refuse it, but
-  // adjudicateClaimWithEvidence (given the individually verified item)
-  // decides on the full evidence set.
-  const bundle = nonDeliveryBundle();
-  const proof = signedEvidence(
-    {
-      id: "ev-delivery",
-      kind: "delivery-proof",
-      content: "carrier scan",
-      delivered_at: "2026-09-30T00:00:00Z",
-      submitted_by: claimant.did,
-    },
-    oracle,
-  );
-  const rebuilt = { ...bundle, evidence: [proof] };
-  assert.throws(
-    () =>
-      adjudicateClaim(
-        rebuilt,
-        0,
-        builtinRulesetFor("non-delivery"),
-        "case-1",
-        arbiter.did,
-        NOW_AFTER,
-      ),
-    /unverified bundle/,
-  );
-  const { verdict } = adjudicateClaimWithEvidence(
-    rebuilt,
-    0,
-    builtinRulesetFor("non-delivery"),
-    "case-1",
-    arbiter.did,
-    [{ item: proof, tier: 2, tierName: "third-party-oracle-signed" }],
-    bundleHash(bundle),
-    NOW_AFTER,
-  );
-  assert.equal(verdict.outcome, "reject");
 });

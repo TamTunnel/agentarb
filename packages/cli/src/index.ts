@@ -17,17 +17,14 @@ import {
   bundleHash,
   evidenceSignPayload,
   generateKeypair,
-  isRevoked,
   signBundle,
   signJws,
   verifyBundle,
-  verifyRevocation,
   verifyVerdict,
   type Bundle,
   type BundlePayload,
   type Ed25519Jwk,
   type EvidenceItem,
-  type RevocationEntry,
 } from "@tamtunnel/agentarb-core";
 
 const VERSION = "0.1.0";
@@ -48,12 +45,9 @@ Usage:
   agentarb verify --in <file.json>
       Auto-detect bundle vs verdict by the format field and verify it.
 
-  agentarb verdict verify --in <verdict.json> [--trusted <did,did,...>] [--revocations <file.json>]
+  agentarb verdict verify --in <verdict.json> [--trusted <did,did,...>]
       Verify a verdict signature (and, when --trusted is given, that the
-      arbiter is in the trusted set). When --revocations is given, the
-      verdict id is also checked against that revocation list: without
-      it, VALID means cryptographically valid only — a revoked verdict
-      still verifies, because revocation is a separate list.
+      arbiter is in the trusted set).
 
   agentarb submit --server <url> --in <bundle.json>
       Submit a signed bundle to an arbiter server.
@@ -118,14 +112,8 @@ function readJson(file: string): unknown {
 }
 
 function writeJson(file: string, value: unknown, mode?: number): void {
-  const content = JSON.stringify(value, null, 2) + "\n";
-  if (mode !== undefined) {
-    // Set the mode at creation: write-then-chmod leaves the file briefly
-    // readable at the default mode, which matters for key material.
-    fs.writeFileSync(file, content, { mode });
-  } else {
-    fs.writeFileSync(file, content);
-  }
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
+  if (mode !== undefined) fs.chmodSync(file, mode);
 }
 
 function loadPrivateKey(keyfile: string): Ed25519Jwk {
@@ -155,22 +143,7 @@ function printBundleReport(bundle: unknown): boolean {
   return true;
 }
 
-function loadRevocations(file: string): RevocationEntry[] {
-  const data = readJson(file) as unknown;
-  const list = Array.isArray(data)
-    ? data
-    : (data as Record<string, unknown>).revocations;
-  if (!Array.isArray(list)) {
-    throw new Error(`${file} must be a JSON array of revocation entries (or {"revocations": [...]})`);
-  }
-  return list as RevocationEntry[];
-}
-
-function printVerdictReport(
-  verdict: unknown,
-  trusted?: string[],
-  revocations?: RevocationEntry[],
-): boolean {
+function printVerdictReport(verdict: unknown, trusted?: string[]): boolean {
   const v = verifyVerdict(
     verdict,
     trusted ? { trustedArbiters: trusted } : {},
@@ -181,29 +154,7 @@ function printVerdictReport(
     return false;
   }
   const d = verdict as Record<string, unknown>;
-  if (revocations) {
-    const revoked = isRevoked(revocations, String(d.id));
-    if (revoked) {
-      // Signature-valid but void: revocation is checked separately from
-      // cryptography, and a revoked verdict must never read as live.
-      const rv = verifyRevocation(revoked);
-      console.log("REVOKED verdict:");
-      console.log(`  id:       ${d.id}`);
-      console.log(`  reason:   ${revoked.reason}`);
-      console.log(`  revoked_at: ${revoked.revoked_at}`);
-      if (!rv.ok) {
-        console.log(`  note: revocation entry itself does not verify (${rv.errors.join("; ")})`);
-      }
-      return false;
-    }
-  }
   console.log("VALID verdict");
-  if (!trusted) {
-    console.log("  note: no --trusted set given, so the arbiter is not checked against any trust set");
-  }
-  if (!revocations) {
-    console.log("  note: revocation not checked (pass --revocations <file>); VALID means cryptographically valid only");
-  }
   console.log(`  id:       ${d.id}`);
   console.log(`  method:   ${d.method}`);
   console.log(`  outcome:  ${d.outcome}`);
@@ -304,12 +255,7 @@ async function main(): Promise<void> {
     if (doc.format === "agentarb-bundle") {
       process.exitCode = printBundleReport(doc) ? 0 : 1;
     } else if (doc.format === "agentarb-verdict") {
-      const revFile = flag(args, "revocations");
-      process.exitCode = printVerdictReport(
-        doc,
-        undefined,
-        revFile ? loadRevocations(revFile) : undefined,
-      ) ? 0 : 1;
+      process.exitCode = printVerdictReport(doc) ? 0 : 1;
     } else {
       console.error(`unknown format: ${String(doc.format)}`);
       process.exitCode = 2;
@@ -320,11 +266,9 @@ async function main(): Promise<void> {
   if (cmd === "verdict" && sub === "verify") {
     const infile = required(args, "in");
     const trusted = flag(args, "trusted");
-    const revFile = flag(args, "revocations");
     const ok = printVerdictReport(
       readJson(infile),
       trusted ? trusted.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
-      revFile ? loadRevocations(revFile) : undefined,
     );
     process.exitCode = ok ? 0 : 1;
     return;

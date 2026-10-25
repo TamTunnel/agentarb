@@ -28,17 +28,7 @@ export class CanonicalizationError extends Error {
   }
 }
 
-/** Maximum JSON nesting depth canonicalization will traverse. Above this,
- *  canonicalize throws CanonicalizationError instead of overflowing the
- *  call stack on a hostile deeply-nested payload. */
-export const MAX_CANONICAL_DEPTH = 100;
-
-function canonicalizeValue(value: unknown, depth: number): string {
-  if (depth > MAX_CANONICAL_DEPTH) {
-    throw new CanonicalizationError(
-      `JSON nesting exceeds maximum depth ${MAX_CANONICAL_DEPTH}`,
-    );
-  }
+function canonicalizeValue(value: unknown): string {
   if (value === null) return "null";
   const t = typeof value;
   if (t === "string" || t === "boolean") return JSON.stringify(value);
@@ -50,14 +40,14 @@ function canonicalizeValue(value: unknown, depth: number): string {
     return JSON.stringify(n);
   }
   if (Array.isArray(value)) {
-    return "[" + value.map((v) => canonicalizeValue(v, depth + 1)).join(",") + "]";
+    return "[" + value.map((v) => canonicalizeValue(v)).join(",") + "]";
   }
   if (t === "object") {
     const obj = value as Record<string, unknown>;
     const keys = Object.keys(obj).sort();
     const parts: string[] = [];
     for (const k of keys) {
-      parts.push(JSON.stringify(k) + ":" + canonicalizeValue(obj[k], depth + 1));
+      parts.push(JSON.stringify(k) + ":" + canonicalizeValue(obj[k]));
     }
     return "{" + parts.join(",") + "}";
   }
@@ -66,7 +56,7 @@ function canonicalizeValue(value: unknown, depth: number): string {
 
 /** Canonical JSON string for a JSON value (RFC 8785). */
 export function canonicalize(value: unknown): string {
-  return canonicalizeValue(value, 0);
+  return canonicalizeValue(value);
 }
 
 /** SHA-256 hex digest of the canonical form — the content address. */

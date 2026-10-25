@@ -22,15 +22,7 @@ import { Store } from "./store.js";
 function main(): void {
   const dataDir =
     process.env.AGENTARB_DATA_DIR || path.join(process.cwd(), "agentarb-data");
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  // mkdir's mode only applies at creation — tighten a pre-existing dir
-  // too, since it holds the arbiter private key. Best effort: a dir the
-  // process cannot chmod is left as-is rather than failing startup.
-  try {
-    fs.chmodSync(dataDir, 0o700);
-  } catch {
-    // ignore
-  }
+  fs.mkdirSync(dataDir, { recursive: true });
   if (!process.env.SI_WALLET_DIR) {
     process.env.SI_WALLET_DIR = dataDir;
   }

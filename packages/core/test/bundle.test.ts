@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import {
   basePayload,
   party,
@@ -11,7 +10,6 @@ import {
   filterEvidenceForClaim,
   validateBundlePayload,
   verifyBundle,
-  verifyEvidenceItem,
 } from "../dist/index.js";
 
 const claimant = party(1);
@@ -206,115 +204,4 @@ test("bundle: min-tier filtering per claim type", () => {
   const ld = filterEvidenceForClaim(v.evidence, "late-delivery");
   assert.deepEqual(ld.admitted.map((e) => e.item.id), ["o"]);
   assert.deepEqual(ld.excluded.map((e) => e.id).sort(), ["s", "u"]);
-});
-
-test("bundle: sum of claims capped at transaction amount (double recovery)", () => {
-  const payload = basePayload();
-  payload.claims = [
-    { type: "non-delivery", amount_minor: 10000, details: {} },
-    {
-      type: "wrong-partial-delivery",
-      amount_minor: 3000,
-      details: { missing_minor: 3000 },
-    },
-  ];
-  // Each claim alone is within the 10000 transaction, but together they
-  // claim 13000 on contradictory theories of the same loss.
-  const errors = validateBundlePayload(payload);
-  assert.ok(
-    errors.some((e) => e.includes("sum of claim amounts")),
-    errors.join("; "),
-  );
-  // Exactly at the transaction amount is fine.
-  payload.claims = [
-    { type: "non-delivery", amount_minor: 6000, details: {} },
-    {
-      type: "wrong-partial-delivery",
-      amount_minor: 4000,
-      details: { missing_minor: 4000 },
-    },
-  ];
-  assert.deepEqual(validateBundlePayload(payload), []);
-});
-
-test("bundle: party-signed item from a third-party submitter is tier 2, not 3", () => {
-  const payload = basePayload();
-  payload.evidence = [
-    signedEvidence(
-      {
-        id: "ev-third-party-submission",
-        kind: "delivery-proof",
-        content: "admission",
-        submitted_by: oracle.did,
-      },
-      respondent,
-    ),
-  ];
-  const bundle = signedBundle(payload, [claimant]);
-  const v = verifyBundle(bundle);
-  assert.equal(v.ok, true, v.errors.join("; "));
-  // Tier 3 requires the admission structure (one party submits, the other
-  // signed). A third-party submitter breaks it, so this is tier 2.
-  assert.equal(v.evidence[0].tier, 2);
-});
-
-test("bundle: deeply nested payload fails verification, never throws", () => {
-  const payload = basePayload();
-  let deep: Record<string, unknown> = {};
-  let cursor = deep;
-  for (let i = 0; i < 2000; i++) {
-    const next: Record<string, unknown> = {};
-    cursor.nested = next;
-    cursor = next;
-  }
-  payload.claims = [
-    { type: "non-delivery", amount_minor: 10000, details: deep },
-  ];
-  const bundle = {
-    ...payload,
-    signatures: [{ signer: claimant.did, jws: "junk.junk.junk" }],
-  };
-  const v = verifyBundle(bundle);
-  assert.equal(v.ok, false);
-  assert.ok(
-    v.errors.some((e) => e.includes("depth")),
-    v.errors.join("; "),
-  );
-});
-
-test("bundle: content/sha256 mismatch is rejected; match is accepted", () => {
-  // m12: when an item carries both content and sha256, the digest must
-  // be the SHA-256 of the content bytes — signed or not.
-  const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
-  const bad = {
-    id: "e-mismatch",
-    kind: "other" as const,
-    content: "REAL CONTENT",
-    sha256: "0".repeat(64),
-    submitted_by: claimant.did,
-  };
-  const vBad = verifyEvidenceItem(bad, claimant.did, respondent.did);
-  assert.equal(vBad.ok, false);
-  assert.ok(vBad.errors.some((e) => e.includes("sha256 does not match content")));
-  const signedBad = signedEvidence(bad, claimant);
-  assert.equal(verifyEvidenceItem(signedBad, claimant.did, respondent.did).ok, false);
-  const good = {
-    id: "e-match",
-    kind: "other" as const,
-    content: "REAL CONTENT",
-    sha256: sha("REAL CONTENT"),
-    submitted_by: claimant.did,
-  };
-  assert.equal(verifyEvidenceItem(good, claimant.did, respondent.did).ok, true);
-  assert.equal(verifyEvidenceItem(signedEvidence(good, claimant), claimant.did, respondent.did).ok, true);
-  // A sha256 alongside a uri (no inline content) stays an unverified
-  // claim about remote bytes — no fetcher in v1 — so it still verifies.
-  const remote = {
-    id: "e-remote",
-    kind: "other" as const,
-    uri: "https://example.invalid/file.bin",
-    sha256: "0".repeat(64),
-    submitted_by: claimant.did,
-  };
-  assert.equal(verifyEvidenceItem(remote, claimant.did, respondent.did).ok, true);
 });

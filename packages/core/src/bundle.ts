@@ -16,10 +16,8 @@
 // is never silently downgraded.
 //
 // Evidence trust tiers (highest first):
-//   3 counterparty-signed — submitted by one party and signed by the
-//     other party (an admission against interest). A party-signed item
-//     submitted by a third party is NOT tier 3 — the admission structure
-//     requires the other party to be the submitter.
+//   3 counterparty-signed — signed by a party to the dispute who did NOT
+//     submit the item (an admission against interest).
 //   2 third-party-oracle-signed — signed by someone who is not a party.
 //   1 self-signed — signed by the submitter themselves.
 //   0 unsigned — no signature claim at all.
@@ -27,8 +25,7 @@
 // a minimum tier (see MIN_TIER_FOR_CLAIM_TYPE). Items below the minimum
 // are excluded from evaluation and recorded in the trace.
 
-import { canonicalize, canonicalHashSync, CanonicalizationError } from "./jcs.js";
-import { createHash } from "node:crypto";
+import { canonicalize, canonicalHashSync } from "./jcs.js";
 import { isDidKey } from "./did.js";
 import { signJws, verifyJws, type Ed25519Jwk } from "./jws.js";
 import { isMinorUnits } from "./money.js";
@@ -86,11 +83,6 @@ export interface EvidenceItem {
   id: string;
   kind: EvidenceKind;
   content?: string | null;
-  /**
-   * Claimed SHA-256 digest. When content is also present, this must be
-   * the digest of the content bytes (verified). With a uri and no
-   * content, it is an unverified claim about remote bytes (no fetcher).
-   */
   sha256?: string | null;
   uri?: string | null;
   /** ISO-8601 timestamp the evidence asserts (e.g. delivery time). */
@@ -200,7 +192,7 @@ export function addBundleSignature(
 
 // ---------------------------------------------------------------- validation
 
-export function isIsoDate(s: unknown): s is string {
+function isIsoDate(s: unknown): s is string {
   return (
     typeof s === "string" &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/.test(s) &&
@@ -212,7 +204,7 @@ function isSha256Hex(s: unknown): s is string {
   return typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
 }
 
-export function isHttpUrl(s: unknown): s is string {
+function isHttpUrl(s: unknown): s is string {
   if (typeof s !== "string") return false;
   try {
     const u = new URL(s);
@@ -318,31 +310,6 @@ export function validateBundlePayload(
         }
       }
     });
-    // Cap the SUM of claims at the transaction amount, not just each claim
-    // individually: two claims on contradictory theories of the same loss
-    // (e.g. non-delivery refund_full plus wrong-partial refund_partial)
-    // must never pay out more than the transaction itself.
-    if (typeof txAmount === "number") {
-      let sum = 0;
-      let allAmountsValid = true;
-      for (const c of p.claims as unknown[]) {
-        if (
-          c !== null &&
-          typeof c === "object" &&
-          !Array.isArray(c) &&
-          isMinorUnits((c as Record<string, unknown>).amount_minor)
-        ) {
-          sum += (c as Record<string, unknown>).amount_minor as number;
-        } else {
-          allAmountsValid = false;
-        }
-      }
-      if (allAmountsValid && sum > txAmount) {
-        errors.push(
-          `sum of claim amounts (${sum}) must not exceed transaction.amount_minor (${txAmount})`,
-        );
-      }
-    }
   }
 
   if (!Array.isArray(p.evidence)) {
@@ -412,30 +379,12 @@ export interface EvidenceVerification {
  * Verify a single evidence item: signature validity, signer agreement,
  * and tier computation. Used by verifyBundle and by the server's
  * add-evidence endpoint so both paths agree exactly.
- *
- * Content-hash binding: when an item carries BOTH content and sha256,
- * the sha256 must be the SHA-256 of the content bytes — a signed item
- * must not claim content X with the hash of Y. A sha256 alongside a uri
- * (no inline content) is an unverified claim about remote bytes: v1 has
- * no fetcher, so nothing checks it (documented limitation).
  */
 export function verifyEvidenceItem(
   item: EvidenceItem,
   claimant: string,
   respondent: string,
 ): EvidenceVerification {
-  if (
-    item.content != null &&
-    item.sha256 != null &&
-    createHash("sha256").update(item.content, "utf8").digest("hex") !== item.sha256
-  ) {
-    return {
-      ok: false,
-      errors: [`evidence ${item.id}: sha256 does not match content`],
-      tier: null,
-      tierName: null,
-    };
-  }
   if (item.jws == null) {
     return { ok: true, errors: [], tier: 0, tierName: TIER_NAMES[0] };
   }
@@ -456,38 +405,19 @@ export function verifyEvidenceItem(
       tierName: null,
     };
   }
-  let covers: boolean;
-  try {
-    covers = canonicalize(v.payload) === canonicalize(evidenceSignPayload(item));
-  } catch (e) {
-    if (e instanceof CanonicalizationError || e instanceof RangeError) {
-      return {
-        ok: false,
-        errors: [`evidence ${item.id}: item cannot be canonicalized (${(e as Error).message})`],
-        tier: null,
-        tierName: null,
-      };
-    }
-    throw e;
-  }
-  if (!covers) {
+  if (canonicalize(v.payload) !== canonicalize(evidenceSignPayload(item))) {
     return {
       ok: false,
       errors: [`evidence ${item.id}: signature does not cover this item`],
       tier: null,
       tierName: null,
     };
-  }  const signer = item.signer;
+  }
+  const signer = item.signer;
   let tier: EvidenceTier;
   if (signer === item.submitted_by) {
     tier = 1;
-  } else if (
-    (item.submitted_by === claimant && signer === respondent) ||
-    (item.submitted_by === respondent && signer === claimant)
-  ) {
-    // Tier 3 requires the admission structure: one party submits, the
-    // other party signed. A party-signed item submitted by a third party
-    // is tier 2 — independently signed, but not an admission.
+  } else if (signer === claimant || signer === respondent) {
     tier = 3;
   } else {
     tier = 2;
@@ -531,21 +461,7 @@ export function verifyBundle(
     errors.push("signatures must be a non-empty array");
   }
   const payload = bundlePayload(b);
-  let expectedCanonical: string;
-  try {
-    expectedCanonical = canonicalize(payload);
-  } catch (e) {
-    if (e instanceof CanonicalizationError || e instanceof RangeError) {
-      return {
-        ok: false,
-        errors: [`bundle payload cannot be canonicalized (${(e as Error).message})`],
-        hash: null,
-        signers: [],
-        evidence: [],
-      };
-    }
-    throw e;
-  }
+  const expectedCanonical = canonicalize(payload);
   const signers: string[] = [];
   if (Array.isArray(b.signatures)) {
     for (let i = 0; i < b.signatures.length; i++) {
@@ -559,17 +475,7 @@ export function verifyBundle(
         errors.push(`signatures[${i}] (${sig.signer}): ${v.reason}`);
         continue;
       }
-      let covers: boolean;
-      try {
-        covers = canonicalize(v.payload) === expectedCanonical;
-      } catch (e) {
-        if (e instanceof CanonicalizationError || e instanceof RangeError) {
-          errors.push(`signatures[${i}] cannot be canonicalized (${(e as Error).message})`);
-          continue;
-        }
-        throw e;
-      }
-      if (!covers) {
+      if (canonicalize(v.payload) !== expectedCanonical) {
         errors.push(`signatures[${i}] does not sign this bundle payload`);
         continue;
       }

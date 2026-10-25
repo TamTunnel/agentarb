@@ -6,9 +6,8 @@
 //
 // Supported operations: var, ==, !=, ===, !==, >, >=, <, <=, !, !!,
 // and, or, if, in, missing, filter, map, all, some, none, +, -, *, /, %.
-// Any unknown operation throws — a rule that cannot be evaluated aborts
-// adjudication (the engine throws RuleError; the server rolls the whole
-// adjudication back and returns 400) instead of silently evaluating to false.
+// Any unknown operation throws — a rule that cannot be evaluated fails
+// closed (the engine escalates) instead of silently evaluating to false.
 //
 // Semantics follow the JSONLogic spec: `and`/`or` return values (first
 // falsy / first truthy, else the last value); `if` takes
@@ -73,15 +72,10 @@ function looseEqual(a: unknown, b: unknown): boolean {
   return a == b;
 }
 
-export const MAX_RULE_DEPTH = 100;
-
-export function evaluate(logic: JsonLogic, data: unknown, depth = 0): unknown {
-  if (depth > MAX_RULE_DEPTH) {
-    throw new RuleError(`rule exceeds maximum nesting depth (${MAX_RULE_DEPTH})`);
-  }
+export function evaluate(logic: JsonLogic, data: unknown): unknown {
   if (logic === null || typeof logic !== "object") return logic;
   if (Array.isArray(logic)) {
-    return logic.map((v) => evaluate(v, data, depth + 1));
+    return logic.map((v) => evaluate(v, data));
   }
   const keys = Object.keys(logic);
   if (keys.length !== 1) {
@@ -96,33 +90,33 @@ export function evaluate(logic: JsonLogic, data: unknown, depth = 0): unknown {
       const path = args[0];
       const value = resolveVar(path, data);
       if (value === undefined && args.length > 1) {
-        return evaluate(args[1], data, depth + 1);
+        return evaluate(args[1], data);
       }
       return value === undefined ? null : value;
     }
     case "==": {
       if (args.length !== 2) throw new RuleError("== takes exactly 2 arguments");
-      return looseEqual(evaluate(args[0], data, depth + 1), evaluate(args[1], data, depth + 1));
+      return looseEqual(evaluate(args[0], data), evaluate(args[1], data));
     }
     case "!=": {
       if (args.length !== 2) throw new RuleError("!= takes exactly 2 arguments");
-      return !looseEqual(evaluate(args[0], data, depth + 1), evaluate(args[1], data, depth + 1));
+      return !looseEqual(evaluate(args[0], data), evaluate(args[1], data));
     }
     case "===": {
       if (args.length !== 2) throw new RuleError("=== takes exactly 2 arguments");
-      return evaluate(args[0], data, depth + 1) === evaluate(args[1], data, depth + 1);
+      return evaluate(args[0], data) === evaluate(args[1], data);
     }
     case "!==": {
       if (args.length !== 2) throw new RuleError("!== takes exactly 2 arguments");
-      return evaluate(args[0], data, depth + 1) !== evaluate(args[1], data, depth + 1);
+      return evaluate(args[0], data) !== evaluate(args[1], data);
     }
     case ">":
     case ">=":
     case "<":
     case "<=": {
       if (args.length !== 2) throw new RuleError(`${op} takes exactly 2 arguments`);
-      const a = toNumber(evaluate(args[0], data, depth + 1), op);
-      const b = toNumber(evaluate(args[1], data, depth + 1), op);
+      const a = toNumber(evaluate(args[0], data), op);
+      const b = toNumber(evaluate(args[1], data), op);
       if (op === ">") return a > b;
       if (op === ">=") return a >= b;
       if (op === "<") return a < b;
@@ -130,16 +124,16 @@ export function evaluate(logic: JsonLogic, data: unknown, depth = 0): unknown {
     }
     case "!": {
       if (args.length !== 1) throw new RuleError("! takes exactly 1 argument");
-      return !truthy(evaluate(args[0], data, depth + 1));
+      return !truthy(evaluate(args[0], data));
     }
     case "!!": {
       if (args.length !== 1) throw new RuleError("!! takes exactly 1 argument");
-      return truthy(evaluate(args[0], data, depth + 1));
+      return truthy(evaluate(args[0], data));
     }
     case "and": {
       let result: unknown = true;
       for (const a of args) {
-        result = evaluate(a, data, depth + 1);
+        result = evaluate(a, data);
         if (!truthy(result)) return result;
       }
       return result;
@@ -147,22 +141,22 @@ export function evaluate(logic: JsonLogic, data: unknown, depth = 0): unknown {
     case "or": {
       let result: unknown = false;
       for (const a of args) {
-        result = evaluate(a, data, depth + 1);
+        result = evaluate(a, data);
         if (truthy(result)) return result;
       }
       return result;
     }
     case "if": {
       for (let i = 0; i + 1 < args.length; i += 2) {
-        if (truthy(evaluate(args[i], data, depth + 1))) return evaluate(args[i + 1], data, depth + 1);
+        if (truthy(evaluate(args[i], data))) return evaluate(args[i + 1], data);
       }
-      if (args.length % 2 === 1) return evaluate(args[args.length - 1], data, depth + 1);
+      if (args.length % 2 === 1) return evaluate(args[args.length - 1], data);
       return null;
     }
     case "in": {
       if (args.length !== 2) throw new RuleError("in takes exactly 2 arguments");
-      const needle = evaluate(args[0], data, depth + 1);
-      const hay = evaluate(args[1], data, depth + 1);
+      const needle = evaluate(args[0], data);
+      const hay = evaluate(args[1], data);
       if (typeof hay === "string" && typeof needle === "string") {
         return hay.includes(needle);
       }
@@ -171,7 +165,7 @@ export function evaluate(logic: JsonLogic, data: unknown, depth = 0): unknown {
     }
     case "missing": {
       const names = args.flatMap((a) => {
-        const v = evaluate(a, data, depth + 1);
+        const v = evaluate(a, data);
         return Array.isArray(v) ? v : [v];
       });
       const out: unknown[] = [];
@@ -183,50 +177,50 @@ export function evaluate(logic: JsonLogic, data: unknown, depth = 0): unknown {
     }
     case "filter": {
       if (args.length !== 2) throw new RuleError("filter takes exactly 2 arguments");
-      const arr = evaluate(args[0], data, depth + 1);
+      const arr = evaluate(args[0], data);
       if (!Array.isArray(arr)) throw new RuleError("filter: first argument must be an array");
-      return arr.filter((el) => truthy(evaluate(args[1], el, depth + 1)));
+      return arr.filter((el) => truthy(evaluate(args[1], el)));
     }
     case "map": {
       if (args.length !== 2) throw new RuleError("map takes exactly 2 arguments");
-      const arr = evaluate(args[0], data, depth + 1);
+      const arr = evaluate(args[0], data);
       if (!Array.isArray(arr)) throw new RuleError("map: first argument must be an array");
-      return arr.map((el) => evaluate(args[1], el, depth + 1));
+      return arr.map((el) => evaluate(args[1], el));
     }
     case "all":
     case "some":
     case "none": {
       if (args.length !== 2) throw new RuleError(`${op} takes exactly 2 arguments`);
-      const arr = evaluate(args[0], data, depth + 1);
+      const arr = evaluate(args[0], data);
       if (!Array.isArray(arr)) throw new RuleError(`${op}: first argument must be an array`);
-      if (op === "all") return arr.every((el) => truthy(evaluate(args[1], el, depth + 1)));
-      if (op === "some") return arr.some((el) => truthy(evaluate(args[1], el, depth + 1)));
-      return !arr.some((el) => truthy(evaluate(args[1], el, depth + 1)));
+      if (op === "all") return arr.every((el) => truthy(evaluate(args[1], el)));
+      if (op === "some") return arr.some((el) => truthy(evaluate(args[1], el)));
+      return !arr.some((el) => truthy(evaluate(args[1], el)));
     }
     case "+": {
-      if (args.length === 1) return toNumber(evaluate(args[0], data, depth + 1), "+");
+      if (args.length === 1) return toNumber(evaluate(args[0], data), "+");
       let sum = 0;
-      for (const a of args) sum += toNumber(evaluate(a, data, depth + 1), "+");
+      for (const a of args) sum += toNumber(evaluate(a, data), "+");
       if (!Number.isFinite(sum)) throw new RuleError("+: non-finite result");
       return sum;
     }
     case "-": {
-      if (args.length === 1) return -toNumber(evaluate(args[0], data, depth + 1), "-");
+      if (args.length === 1) return -toNumber(evaluate(args[0], data), "-");
       if (args.length !== 2) throw new RuleError("- takes 1 or 2 arguments");
-      const r = toNumber(evaluate(args[0], data, depth + 1), "-") - toNumber(evaluate(args[1], data, depth + 1), "-");
+      const r = toNumber(evaluate(args[0], data), "-") - toNumber(evaluate(args[1], data), "-");
       if (!Number.isFinite(r)) throw new RuleError("-: non-finite result");
       return r;
     }
     case "*": {
       let prod = 1;
-      for (const a of args) prod *= toNumber(evaluate(a, data, depth + 1), "*");
+      for (const a of args) prod *= toNumber(evaluate(a, data), "*");
       if (!Number.isFinite(prod)) throw new RuleError("*: non-finite result");
       return prod;
     }
     case "/": {
       if (args.length !== 2) throw new RuleError("/ takes exactly 2 arguments");
-      const a = toNumber(evaluate(args[0], data, depth + 1), "/");
-      const b = toNumber(evaluate(args[1], data, depth + 1), "/");
+      const a = toNumber(evaluate(args[0], data), "/");
+      const b = toNumber(evaluate(args[1], data), "/");
       if (b === 0) throw new RuleError("/: division by zero");
       const r = a / b;
       if (!Number.isFinite(r)) throw new RuleError("/: non-finite result");
@@ -234,8 +228,8 @@ export function evaluate(logic: JsonLogic, data: unknown, depth = 0): unknown {
     }
     case "%": {
       if (args.length !== 2) throw new RuleError("% takes exactly 2 arguments");
-      const a = toNumber(evaluate(args[0], data, depth + 1), "%");
-      const b = toNumber(evaluate(args[1], data, depth + 1), "%");
+      const a = toNumber(evaluate(args[0], data), "%");
+      const b = toNumber(evaluate(args[1], data), "%");
       if (b === 0) throw new RuleError("%: division by zero");
       return a % b;
     }
