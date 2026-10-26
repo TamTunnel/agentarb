@@ -777,10 +777,14 @@ test("server: human verdict checks — hash, content id, self-dealing (M3)", asy
       decided_at: "2026-10-11T00:00:00Z",
       arbiter: human.did,
     };
-    const nonContent = signVerdict(
-      { ...core, id: "v_not_content", signature: null } as Verdict,
-      human.privateJwk,
-    );
+    // Non-content-addressed id, correct hash. signVerdict now refuses
+    // to mint such a verdict, so sign the payload directly: the server
+    // must still reject the signature-valid, wrong-id verdict.
+    const nonContent = {
+      ...core,
+      id: "v_not_content",
+      signature: signJws(verdictSignPayload(core as never), human.privateJwk),
+    };
     assert.equal((await post(nonContent)).statusCode, 400);
 
     // Self-dealing: the claimant signing their own "human verdict".
@@ -1068,6 +1072,147 @@ test("server: deeply nested bundle returns 400, not 500", async () => {
     });
     assert.equal(res.statusCode, 400, res.body);
     assert.match(res.body, /bundle verification failed/);
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("server: add-evidence rejects unsigned extra fields (shallow and deep)", async () => {
+  // m2: the evidence schema must not accept — let alone persist —
+  // fields outside the evidence shape, however deeply nested.
+  const { app, store } = makeApp();
+  await ready(app);
+  try {
+    const bundle = signedMulti(bundlePayload(), [claimant]);
+    const { body } = await submitCase(app, bundle);
+    const caseId = body.case_id as string;
+    const base = {
+      id: "ev-extra",
+      kind: "other",
+      content: "x",
+      submitted_by: claimant.did,
+    };
+    const shallow = await app.inject({
+      method: "POST",
+      url: `/v1/cases/${caseId}/evidence`,
+      payload: { evidence: { ...base, unsigned_note: "looks official", admin: true } },
+    });
+    assert.equal(shallow.statusCode, 400, shallow.body);
+    let deepExtra: Record<string, unknown> = { leaf: 1 };
+    for (let i = 0; i < 200; i++) deepExtra = { nest: deepExtra };
+    const deep = await app.inject({
+      method: "POST",
+      url: `/v1/cases/${caseId}/evidence`,
+      payload: { evidence: { ...base, extra: deepExtra } },
+    });
+    assert.equal(deep.statusCode, 400, deep.body.slice(0, 200));
+    // And the server is still alive after the deep body.
+    const health = await app.inject({ method: "GET", url: "/health" });
+    assert.equal(health.statusCode, 200);
+    // Nothing persisted: case detail shows no extra-field evidence.
+    const detail = await app.inject({ method: "GET", url: `/v1/cases/${caseId}` });
+    assert.deepEqual((detail.json() as { evidence: unknown[] }).evidence, []);
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("server: add-evidence rejects garbage delivered_at like the bundle path", async () => {
+  // m3
+  const { app, store } = makeApp();
+  await ready(app);
+  try {
+    const bundle = signedMulti(bundlePayload(), [claimant]);
+    const { body } = await submitCase(app, bundle);
+    const caseId = body.case_id as string;
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/cases/${caseId}/evidence`,
+      payload: {
+        evidence: {
+          id: "ev-garbage",
+          kind: "delivery-proof",
+          content: "x",
+          delivered_at: "not-a-date",
+          submitted_by: claimant.did,
+        },
+      },
+    });
+    assert.equal(res.statusCode, 400, res.body);
+    assert.match(res.body, /delivered_at/);
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("server: identical-claims adjudication fails cleanly, no SQLite leak", async () => {
+  // m8: two identical claims produce identical verdict ids; the UNIQUE
+  // failure must surface as a clean 400 with a full rollback.
+  const { app, store } = makeApp();
+  await ready(app);
+  try {
+    const payload = bundlePayload({
+      claims: [
+        { type: "non-delivery", amount_minor: 5000, details: {} },
+        { type: "non-delivery", amount_minor: 5000, details: {} },
+      ],
+    });
+    const bundle = signedMulti(payload, [claimant]);
+    const { body } = await submitCase(app, bundle);
+    const caseId = body.case_id as string;
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/cases/${caseId}/adjudicate`,
+      payload: {},
+    });
+    assert.equal(res.statusCode, 400, res.body);
+    assert.doesNotMatch(res.body, /UNIQUE constraint/);
+    assert.match(res.body, /identical claims/);
+    const detail = await app.inject({ method: "GET", url: `/v1/cases/${caseId}` });
+    assert.equal((detail.json() as { status: string }).status, "open");
+    assert.deepEqual((detail.json() as { verdicts: unknown[] }).verdicts, []);
+  } finally {
+    await app.close();
+    store.close();
+  }
+});
+
+test("server: hold created after a refund verdict funds it via the endpoint", async () => {
+  // m11 (endpoint wiring): adjudicate with no hold, then add one — the
+  // hold must immediately refund the outstanding verdict amount.
+  const { app, store } = makeApp();
+  await ready(app);
+  try {
+    const bundle = signedMulti(bundlePayload(), [claimant]);
+    const { body } = await submitCase(app, bundle);
+    const caseId = body.case_id as string;
+    const adj = await app.inject({
+      method: "POST",
+      url: `/v1/cases/${caseId}/adjudicate`,
+      payload: {},
+    });
+    assert.equal(adj.statusCode, 200, adj.body);
+    const verdicts = (adj.json() as { verdicts: Array<{ outcome: string }> }).verdicts;
+    assert.equal(verdicts[0].outcome, "refund_full");
+    const hold = await app.inject({
+      method: "POST",
+      url: "/v1/holds",
+      payload: { case_id: caseId, claim_index: 0, amount_minor: 10000, currency: "USD" },
+    });
+    assert.equal(hold.statusCode, 201, hold.body);
+    const holdJson = hold.json() as {
+      status: string;
+      remaining_minor: number;
+      escrow: Array<{ kind: string; amount_minor: number }>;
+    };
+    assert.equal(holdJson.status, "refunded");
+    assert.equal(holdJson.remaining_minor, 0);
+    assert.equal(holdJson.escrow.length, 1);
+    assert.equal(holdJson.escrow[0].kind, "refund");
+    assert.equal(holdJson.escrow[0].amount_minor, 10000);
   } finally {
     await app.close();
     store.close();

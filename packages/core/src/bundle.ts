@@ -28,6 +28,7 @@
 // are excluded from evaluation and recorded in the trace.
 
 import { canonicalize, canonicalHashSync, CanonicalizationError } from "./jcs.js";
+import { createHash } from "node:crypto";
 import { isDidKey } from "./did.js";
 import { signJws, verifyJws, type Ed25519Jwk } from "./jws.js";
 import { isMinorUnits } from "./money.js";
@@ -85,6 +86,11 @@ export interface EvidenceItem {
   id: string;
   kind: EvidenceKind;
   content?: string | null;
+  /**
+   * Claimed SHA-256 digest. When content is also present, this must be
+   * the digest of the content bytes (verified). With a uri and no
+   * content, it is an unverified claim about remote bytes (no fetcher).
+   */
   sha256?: string | null;
   uri?: string | null;
   /** ISO-8601 timestamp the evidence asserts (e.g. delivery time). */
@@ -194,7 +200,7 @@ export function addBundleSignature(
 
 // ---------------------------------------------------------------- validation
 
-function isIsoDate(s: unknown): s is string {
+export function isIsoDate(s: unknown): s is string {
   return (
     typeof s === "string" &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/.test(s) &&
@@ -406,12 +412,30 @@ export interface EvidenceVerification {
  * Verify a single evidence item: signature validity, signer agreement,
  * and tier computation. Used by verifyBundle and by the server's
  * add-evidence endpoint so both paths agree exactly.
+ *
+ * Content-hash binding: when an item carries BOTH content and sha256,
+ * the sha256 must be the SHA-256 of the content bytes — a signed item
+ * must not claim content X with the hash of Y. A sha256 alongside a uri
+ * (no inline content) is an unverified claim about remote bytes: v1 has
+ * no fetcher, so nothing checks it (documented limitation).
  */
 export function verifyEvidenceItem(
   item: EvidenceItem,
   claimant: string,
   respondent: string,
 ): EvidenceVerification {
+  if (
+    item.content != null &&
+    item.sha256 != null &&
+    createHash("sha256").update(item.content, "utf8").digest("hex") !== item.sha256
+  ) {
+    return {
+      ok: false,
+      errors: [`evidence ${item.id}: sha256 does not match content`],
+      tier: null,
+      tierName: null,
+    };
+  }
   if (item.jws == null) {
     return { ok: true, errors: [], tier: 0, tierName: TIER_NAMES[0] };
   }

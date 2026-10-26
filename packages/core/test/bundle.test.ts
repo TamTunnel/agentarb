@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   basePayload,
   party,
@@ -10,6 +11,7 @@ import {
   filterEvidenceForClaim,
   validateBundlePayload,
   verifyBundle,
+  verifyEvidenceItem,
 } from "../dist/index.js";
 
 const claimant = party(1);
@@ -278,4 +280,41 @@ test("bundle: deeply nested payload fails verification, never throws", () => {
     v.errors.some((e) => e.includes("depth")),
     v.errors.join("; "),
   );
+});
+
+test("bundle: content/sha256 mismatch is rejected; match is accepted", () => {
+  // m12: when an item carries both content and sha256, the digest must
+  // be the SHA-256 of the content bytes — signed or not.
+  const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
+  const bad = {
+    id: "e-mismatch",
+    kind: "other" as const,
+    content: "REAL CONTENT",
+    sha256: "0".repeat(64),
+    submitted_by: claimant.did,
+  };
+  const vBad = verifyEvidenceItem(bad, claimant.did, respondent.did);
+  assert.equal(vBad.ok, false);
+  assert.ok(vBad.errors.some((e) => e.includes("sha256 does not match content")));
+  const signedBad = signedEvidence(bad, claimant);
+  assert.equal(verifyEvidenceItem(signedBad, claimant.did, respondent.did).ok, false);
+  const good = {
+    id: "e-match",
+    kind: "other" as const,
+    content: "REAL CONTENT",
+    sha256: sha("REAL CONTENT"),
+    submitted_by: claimant.did,
+  };
+  assert.equal(verifyEvidenceItem(good, claimant.did, respondent.did).ok, true);
+  assert.equal(verifyEvidenceItem(signedEvidence(good, claimant), claimant.did, respondent.did).ok, true);
+  // A sha256 alongside a uri (no inline content) stays an unverified
+  // claim about remote bytes — no fetcher in v1 — so it still verifies.
+  const remote = {
+    id: "e-remote",
+    kind: "other" as const,
+    uri: "https://example.invalid/file.bin",
+    sha256: "0".repeat(64),
+    submitted_by: claimant.did,
+  };
+  assert.equal(verifyEvidenceItem(remote, claimant.did, respondent.did).ok, true);
 });

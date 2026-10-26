@@ -5,19 +5,21 @@ import {
   isRevoked,
   signRevocation,
   signVerdict,
+  verdictIdFor,
+  verdictSignPayload,
   verifyRevocation,
   verifyVerdict,
   type Verdict,
+  type VerdictCore,
 } from "../dist/index.js";
 
 const arbiter = party(9);
 const other = party(10);
 
 function sampleVerdict(): Verdict {
-  return {
+  const core: VerdictCore = {
     format: "agentarb-verdict",
     version: 1,
-    id: "v_abc",
     case_id: "case-1",
     bundle_id: "bundle-1",
     bundle_hash: "a".repeat(64),
@@ -34,8 +36,8 @@ function sampleVerdict(): Verdict {
     ],
     decided_at: "2026-10-10T00:00:00Z",
     arbiter: arbiter.did,
-    signature: null,
   };
+  return { ...core, id: verdictIdFor(verdictSignPayload(core)), signature: null };
 }
 
 test("verdict: sign and verify round-trip", () => {
@@ -129,5 +131,36 @@ test("verdict: human verdict citing only ruleset_version is rejected", () => {
     verifyVerdict(human as Verdict, { allowUnsigned: true }).errors.some((e) =>
       e.includes("must not cite a rule set"),
     ),
+  );
+});
+
+test("verdict: id swapped post-signing fails verification (revocation evasion)", () => {
+  // M1: the signature covers the payload but not the id, so without a
+  // content-address check a revoked verdict could be re-labeled and
+  // presented to an offline consumer as live.
+  const signed = signVerdict(sampleVerdict(), arbiter.privateJwk);
+  assert.equal(verifyVerdict(signed).ok, true);
+  const mutated = { ...signed, id: "v_" + "0".repeat(64) };
+  const v = verifyVerdict(mutated);
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => e.includes("content address")));
+  // And the revocation for the original id does not match the mutant.
+  const entry = signRevocation(
+    {
+      verdict_id: signed.id,
+      reason: "fraud",
+      revoked_at: "2026-10-11T00:00:00Z",
+      arbiter: arbiter.did,
+    },
+    arbiter.privateJwk,
+  );
+  assert.equal(isRevoked([entry], signed.id)?.reason, "fraud");
+  assert.equal(isRevoked([entry], mutated.id), null);
+});
+
+test("verdict: signing a verdict with a non-content id throws", () => {
+  assert.throws(
+    () => signVerdict({ ...sampleVerdict(), id: "v_not_the_address" }, arbiter.privateJwk),
+    /content address/,
   );
 });

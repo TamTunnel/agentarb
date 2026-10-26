@@ -19,9 +19,11 @@ import {
   adjudicateClaimWithEvidence,
   BUNDLE_SCHEMA,
   builtinRulesetFor,
+  CanonicalizationError,
   generateKeypair,
   isDidKey,
   isHttpUrl,
+  isIsoDate,
   isMinorUnits,
   signRevocation,
   signVerdict,
@@ -41,7 +43,11 @@ import {
   type VerifiedEvidence,
 } from "@tamtunnel/agentarb-core";
 import { Store, type CaseStatus } from "./store.js";
-import { applyVerdictToEscrow, checkMandateForHold } from "./escrow.js";
+import {
+  applyUnfundedRefund,
+  applyVerdictToEscrow,
+  checkMandateForHold,
+} from "./escrow.js";
 import {
   renderCaseDetail,
   renderCaseList,
@@ -58,9 +64,31 @@ function bad(reply: FastifyReply, code: number, error: string, details?: unknown
   return reply.status(code).send({ error, ...(details !== undefined ? { details } : {}) });
 }
 
+/** Map a store failure to a safe client-facing message: SQLite internals
+ * (e.g. "UNIQUE constraint failed: verdicts.id" on identical claims)
+ * must never leak through a 400 body. */
+function sanitizedStoreError(e: unknown): string {
+  const msg = (e as Error).message ?? "store operation failed";
+  if (/UNIQUE constraint failed/.test(msg)) {
+    return "duplicate verdict id — identical claims cannot be adjudicated separately; use /escalate for a human decision";
+  }
+  if (/NOT NULL constraint failed|no such table|no such column/.test(msg)) {
+    return "store operation failed";
+  }
+  return msg;
+}
+
 export function createApp(opts: ServerOptions): FastifyInstance {
   const { store } = opts;
-  const app = Fastify({ logger: false });
+  // Fastify 5 strips unknown body fields by default (removeAdditional),
+  // which would silently accept — and, before the handler, erase — junk
+  // fields on the evidence endpoint instead of rejecting them. Disable
+  // stripping so additionalProperties:false in the route schemas is
+  // actually enforced as a 400.
+  const app = Fastify({
+    logger: false,
+    ajv: { customOptions: { removeAdditional: false } },
+  });
 
   // ------------------------------------------------------- arbiter keys
   const nowIso = () => new Date().toISOString();
@@ -76,10 +104,6 @@ export function createApp(opts: ServerOptions): FastifyInstance {
     store.addArbiterKey(kp.did, JSON.stringify(kp.privateJwk), nowIso());
     return { did: kp.did, privateJwk: kp.privateJwk };
   }
-  function trustedArbiterDids(): string[] {
-    return store.getArbiterKeys().map((k) => k.did);
-  }
-
   // ------------------------------------------------------------- helpers
   function caseOr404(id: string) {
     const row = store.getCase(id);
@@ -190,10 +214,12 @@ export function createApp(opts: ServerOptions): FastifyInstance {
         body: {
           type: "object",
           required: ["evidence"],
+          additionalProperties: false,
           properties: {
             evidence: {
               type: "object",
               required: ["id", "kind", "submitted_by"],
+              additionalProperties: false,
               properties: {
                 id: { type: "string", minLength: 1 },
                 kind: { type: "string" },
@@ -229,6 +255,12 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       if (evidence.uri != null && !isHttpUrl(evidence.uri)) {
         return bad(reply, 400, "evidence.uri must be an http(s) URL");
       }
+      // Parity with the bundle path (validateBundlePayload): a garbage
+      // delivered_at must be rejected here too, not coerced to a null
+      // epoch by the engine.
+      if (evidence.delivered_at != null && !isIsoDate(evidence.delivered_at)) {
+        return bad(reply, 400, "evidence.delivered_at must be an ISO-8601 timestamp or null");
+      }
       // Reuse the bundle validator for the single item by checking the
       // item's shape fields directly.
       if (!evidence.content && !evidence.sha256 && !evidence.uri) {
@@ -248,7 +280,17 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       if (existing.some((r) => r.evidence_id === evidence.id)) {
         return bad(reply, 409, `evidence ${evidence.id} already exists on this case`);
       }
-      store.addEvidence(id, evidence.id, evidence, v.tier as number, nowIso());
+      // Defense in depth behind the schema's additionalProperties:false:
+      // a hostile deeply-nested body must be a 400, never a 500 from a
+      // canonicalization throw inside the store.
+      try {
+        store.addEvidence(id, evidence.id, evidence, v.tier as number, nowIso());
+      } catch (e) {
+        if (e instanceof CanonicalizationError || e instanceof RangeError) {
+          return bad(reply, 400, "evidence cannot be canonicalized", (e as Error).message);
+        }
+        throw e;
+      }
       return reply.status(201).send({
         id: evidence.id,
         tier: v.tier,
@@ -366,7 +408,7 @@ export function createApp(opts: ServerOptions): FastifyInstance {
           store.setCaseStatus(id, status, nowIsoStr);
         });
       } catch (e) {
-        return bad(reply, 400, "adjudication failed", (e as Error).message);
+        return bad(reply, 400, "adjudication failed", sanitizedStoreError(e));
       }
       const status: CaseStatus = anyEscalate ? "escalated" : "adjudicated";
       return { case_id: id, status, verdicts, escrow: escrowEffects };
@@ -478,31 +520,37 @@ export function createApp(opts: ServerOptions): FastifyInstance {
         return bad(reply, 400, "verdict verification failed", v.errors);
       }
       // Verdict + escrow + status are one unit (same atomicity argument
-      // as adjudication).
-      const effects = store.transaction(() => {
-        store.saveVerdict(
-          verdict.id,
-          id,
-          claim_index,
-          verdict,
-          verdict.method,
-          verdict.outcome,
-          verdict.refund_minor,
-          nowIso(),
-        );
-        const fx = applyVerdictToEscrow(
-          store,
-          id,
-          claim_index,
-          verdict.id,
-          verdict.outcome,
-          verdict.refund_minor,
-          nowIso(),
-          claim.amount_minor,
-        );
-        store.setCaseStatus(id, "resolved", nowIso());
-        return fx;
-      });
+      // as adjudication). Wrapped like adjudication: any store failure
+      // is a clean 400, never a 500 leaking internals.
+      let effects;
+      try {
+        effects = store.transaction(() => {
+          store.saveVerdict(
+            verdict.id,
+            id,
+            claim_index,
+            verdict,
+            verdict.method,
+            verdict.outcome,
+            verdict.refund_minor,
+            nowIso(),
+          );
+          const fx = applyVerdictToEscrow(
+            store,
+            id,
+            claim_index,
+            verdict.id,
+            verdict.outcome,
+            verdict.refund_minor,
+            nowIso(),
+            claim.amount_minor,
+          );
+          store.setCaseStatus(id, "resolved", nowIso());
+          return fx;
+        });
+      } catch (e) {
+        return bad(reply, 400, "human verdict failed", sanitizedStoreError(e));
+      }
       return { case_id: id, status: "resolved", verdict, escrow: effects };
     },
   );
@@ -588,7 +636,7 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       }
       let mandateAgent: string | null = null;
       if (mandate_jws) {
-        const check = checkMandateForHold(mandate_jws, amount_minor);
+        const check = checkMandateForHold(mandate_jws, amount_minor, currency);
         if (!check.ok) {
           return bad(reply, 400, "mandate verification failed", check.reason);
         }
@@ -596,9 +644,13 @@ export function createApp(opts: ServerOptions): FastifyInstance {
       }
       const holdId = "hold_" + randomUUID();
       const now = nowIso();
-      store.transaction(() => {
+      const refundEffects = store.transaction(() => {
         store.createHold(holdId, case_id, idx, amount_minor, currency, mandate_jws ?? null, mandateAgent, now);
         store.addHoldEvent(holdId, "hold", amount_minor, null, now);
+        // A refund verdict applied before any hold existed leaves cash
+        // outstanding (applied > cumulative); fund it from this hold now
+        // instead of stranding the hold "held" forever.
+        return applyUnfundedRefund(store, case_id, idx, holdId, now);
       });
       return reply.status(201).send({
         hold_id: holdId,
@@ -606,9 +658,10 @@ export function createApp(opts: ServerOptions): FastifyInstance {
         claim_index: idx,
         amount_minor,
         currency,
-        remaining_minor: amount_minor,
-        status: "held",
+        remaining_minor: amount_minor - refundEffects.reduce((s, e) => s + e.amount_minor, 0),
+        status: refundEffects.length > 0 && refundEffects[0].remaining_minor === 0 ? "refunded" : "held",
         mandate_agent: mandateAgent,
+        escrow: refundEffects,
       });
     },
   );
