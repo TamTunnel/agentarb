@@ -14,7 +14,7 @@
 // scripts/sign-rulesets.mjs from builtin-definitions.ts) and are loaded
 // through builtin.ts, which verifies them against the embedded signer DID.
 
-import { canonicalize, canonicalHashSync } from "./jcs.js";
+import { canonicalize, canonicalHashSync, CanonicalizationError } from "./jcs.js";
 import { isDidKey } from "./did.js";
 import { signJws, verifyJws, type Ed25519Jwk } from "./jws.js";
 import type { ClaimType } from "./bundle.js";
@@ -168,16 +168,27 @@ export function verifyRuleset(
   if (opts.trustedSigners && !opts.trustedSigners.includes(r.signer)) {
     errors.push(`signer ${r.signer} is not in the trusted set`);
   }
-  if (hashRuleset(r) !== r.hash) {
-    errors.push("hash does not match rule-set content");
-  }
-  const verified = verifyJws(r.signature, r.signer);
-  if (!verified.ok) {
-    errors.push(`signature invalid (${verified.reason})`);
-    return { ok: false, errors };
-  }
-  if (canonicalize(verified.payload) !== canonicalize(rulesetSignPayload(r))) {
-    errors.push("signature does not cover this rule set");
+  // Library robustness: a hostile deeply-nested rule set must return
+  // { ok: false }, never throw — canonicalization enforces a depth cap
+  // and throws CanonicalizationError above it.
+  try {
+    if (hashRuleset(r) !== r.hash) {
+      errors.push("hash does not match rule-set content");
+    }
+    const verified = verifyJws(r.signature, r.signer);
+    if (!verified.ok) {
+      errors.push(`signature invalid (${verified.reason})`);
+      return { ok: false, errors };
+    }
+    if (canonicalize(verified.payload) !== canonicalize(rulesetSignPayload(r))) {
+      errors.push("signature does not cover this rule set");
+    }
+  } catch (e) {
+    if (e instanceof CanonicalizationError || e instanceof RangeError) {
+      errors.push(`rule set cannot be canonicalized (${(e as Error).message})`);
+      return { ok: false, errors };
+    }
+    throw e;
   }
   return { ok: errors.length === 0, errors };
 }

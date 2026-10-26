@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   builtinRulesetFor,
   builtinSignerDid,
+  generateKeypair,
   loadBuiltinRulesets,
   verifyRuleset,
 } from "../dist/index.js";
@@ -54,4 +55,30 @@ test("rulesets: duplicate rule names rejected", () => {
   const v = verifyRuleset(duped);
   assert.equal(v.ok, false);
   assert.ok(v.errors.some((e) => e.includes("duplicates")));
+});
+
+test("rulesets: deeply-nested rule set returns ok:false instead of throwing", () => {
+  // m1: canonicalization enforces a depth cap; verifyRuleset must map
+  // that throw to a verification failure, never propagate it.
+  let deep: Record<string, unknown> = { v: 1 };
+  for (let i = 0; i < 150; i++) deep = { nest: deep };
+  const signer = generateKeypair();
+  const rs = {
+    format: "agentarb-ruleset",
+    id: "evil",
+    version: 1,
+    claim_type: "non-delivery",
+    description: "deep",
+    min_evidence_tier: 1,
+    rules: [{ name: "r", when: deep, outcome: "refund_full", reason: "x" }],
+    hash: "0".repeat(64),
+    signer: signer.did,
+    signature: "x.y.z",
+  };
+  let res: { ok: boolean; errors: string[] } | null = null;
+  assert.doesNotThrow(() => {
+    res = verifyRuleset(rs);
+  });
+  assert.equal(res!.ok, false);
+  assert.ok(res!.errors.some((e) => e.includes("canonical")));
 });

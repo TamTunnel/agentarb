@@ -7,8 +7,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   generateKeypair,
+  signRevocation,
   signVerdict,
+  verdictIdFor,
+  verdictSignPayload,
   type Verdict,
+  type VerdictCore,
 } from "@tamtunnel/agentarb-core";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -117,27 +121,26 @@ test("cli: verdict verify accepts trusted arbiter, rejects others", () => {
   const dir = tmpdir();
   const arbiter = generateKeypair();
   const other = generateKeypair();
+  const core: VerdictCore = {
+    format: "agentarb-verdict",
+    version: 1,
+    case_id: "case-1",
+    bundle_id: "bundle-1",
+    bundle_hash: "d".repeat(64),
+    ruleset_id: "builtin/non-delivery",
+    ruleset_version: 1,
+    ruleset_hash: "e".repeat(64),
+    method: "rules",
+    outcome: "refund_full",
+    refund_minor: 10000,
+    currency: "USD",
+    claim_amount_minor: 10000,
+    reasoning: [{ rule: "r", matched: true, reason: "ok" }],
+    decided_at: "2026-10-10T00:00:00Z",
+    arbiter: arbiter.did,
+  };
   const verdict: Verdict = signVerdict(
-    {
-      format: "agentarb-verdict",
-      version: 1,
-      id: "v_cli_1",
-      case_id: "case-1",
-      bundle_id: "bundle-1",
-      bundle_hash: "d".repeat(64),
-      ruleset_id: "builtin/non-delivery",
-      ruleset_version: 1,
-      ruleset_hash: "e".repeat(64),
-      method: "rules",
-      outcome: "refund_full",
-      refund_minor: 10000,
-      currency: "USD",
-      claim_amount_minor: 10000,
-      reasoning: [{ rule: "r", matched: true, reason: "ok" }],
-      decided_at: "2026-10-10T00:00:00Z",
-      arbiter: arbiter.did,
-      signature: null,
-    },
+    { ...core, id: verdictIdFor(verdictSignPayload(core)), signature: null },
     arbiter.privateJwk,
   );
   const verdictPath = path.join(dir, "verdict.json");
@@ -220,27 +223,26 @@ test("cli: submit + adjudicate + case against a live server", async () => {
 test("cli: verdict verify without --trusted prints the no-trust-set caveat", () => {
   const dir = tmpdir();
   const arbiter = generateKeypair();
+  const core: VerdictCore = {
+    format: "agentarb-verdict",
+    version: 1,
+    case_id: "case-1",
+    bundle_id: "bundle-1",
+    bundle_hash: "d".repeat(64),
+    ruleset_id: "builtin/non-delivery",
+    ruleset_version: 1,
+    ruleset_hash: "e".repeat(64),
+    method: "rules",
+    outcome: "refund_full",
+    refund_minor: 10000,
+    currency: "USD",
+    claim_amount_minor: 10000,
+    reasoning: [{ rule: "r", matched: true, reason: "ok" }],
+    decided_at: "2026-10-10T00:00:00Z",
+    arbiter: arbiter.did,
+  };
   const verdict: Verdict = signVerdict(
-    {
-      format: "agentarb-verdict",
-      version: 1,
-      id: "v_cli_2",
-      case_id: "case-1",
-      bundle_id: "bundle-1",
-      bundle_hash: "d".repeat(64),
-      ruleset_id: "builtin/non-delivery",
-      ruleset_version: 1,
-      ruleset_hash: "e".repeat(64),
-      method: "rules",
-      outcome: "refund_full",
-      refund_minor: 10000,
-      currency: "USD",
-      claim_amount_minor: 10000,
-      reasoning: [{ rule: "r", matched: true, reason: "ok" }],
-      decided_at: "2026-10-10T00:00:00Z",
-      arbiter: arbiter.did,
-      signature: null,
-    },
+    { ...core, id: verdictIdFor(verdictSignPayload(core)), signature: null },
     arbiter.privateJwk,
   );
   const verdictPath = path.join(dir, "verdict.json");
@@ -249,4 +251,66 @@ test("cli: verdict verify without --trusted prints the no-trust-set caveat", () 
   assert.equal(res.code, 0, res.out);
   assert.match(res.out, /VALID verdict/);
   assert.match(res.out, /no --trusted set given/);
+});
+
+test("cli: verdict verify --revocations flags a revoked verdict, passes others", () => {
+  const dir = tmpdir();
+  const arbiter = generateKeypair();
+  const core: VerdictCore = {
+    format: "agentarb-verdict",
+    version: 1,
+    case_id: "case-1",
+    bundle_id: "bundle-1",
+    bundle_hash: "d".repeat(64),
+    ruleset_id: "builtin/non-delivery",
+    ruleset_version: 1,
+    ruleset_hash: "e".repeat(64),
+    method: "rules",
+    outcome: "refund_full",
+    refund_minor: 10000,
+    currency: "USD",
+    claim_amount_minor: 10000,
+    reasoning: [{ rule: "r", matched: true, reason: "ok" }],
+    decided_at: "2026-10-10T00:00:00Z",
+    arbiter: arbiter.did,
+  };
+  const verdict: Verdict = signVerdict(
+    { ...core, id: verdictIdFor(verdictSignPayload(core)), signature: null },
+    arbiter.privateJwk,
+  );
+  const verdictPath = path.join(dir, "verdict.json");
+  fs.writeFileSync(verdictPath, JSON.stringify(verdict, null, 2));
+  // Without --revocations, a revoked verdict still reads VALID (crypto
+  // only) — but the caveat note must be present.
+  const entry = signRevocation(
+    {
+      verdict_id: verdict.id,
+      reason: "issued in error",
+      revoked_at: "2026-10-11T00:00:00Z",
+      arbiter: arbiter.did,
+    },
+    arbiter.privateJwk,
+  );
+  const revPath = path.join(dir, "revocations.json");
+  fs.writeFileSync(revPath, JSON.stringify([entry], null, 2));
+  const plain = runCli(["verdict", "verify", "--in", verdictPath], dir);
+  assert.equal(plain.code, 0, plain.out);
+  assert.match(plain.out, /VALID verdict/);
+  assert.match(plain.out, /revocation not checked/);
+  const flagged = runCli(
+    ["verdict", "verify", "--in", verdictPath, "--revocations", revPath],
+    dir,
+  );
+  assert.equal(flagged.code, 1);
+  assert.match(flagged.out, /REVOKED verdict/);
+  assert.match(flagged.out, /issued in error/);
+  // An empty revocation list leaves the verdict VALID.
+  const emptyPath = path.join(dir, "empty.json");
+  fs.writeFileSync(emptyPath, "[]");
+  const clean = runCli(
+    ["verdict", "verify", "--in", verdictPath, "--revocations", emptyPath],
+    dir,
+  );
+  assert.equal(clean.code, 0, clean.out);
+  assert.match(clean.out, /VALID verdict/);
 });
