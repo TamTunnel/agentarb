@@ -49,6 +49,13 @@ records of holds, releases, and refunds — that real payment adapters
 (Stripe, on-chain) will settle against later. The verdict format is
 already final, so adapters slot in without changing it.
 
+## Demo
+
+See a real sample arbitration — a $100 non-delivery dispute, walked through
+from signed evidence bundle to signed verdict to escrow refund — at
+<https://tamtunnel.github.io/agentarb/>, with a short captioned explainer
+video at <https://tamtunnel.github.io/agentarb/#video>.
+
 ## Quick start
 
 Requires Node 24+.
