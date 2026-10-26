@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentArb — sample arbitration</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;max-width:860px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#1a1a1a}
+h1{font-size:1.9rem;line-height:1.2}h2{margin-top:2.2rem;border-top:1px solid #ddd;padding-top:1rem}
+code{word-break:break-all;background:#f4f4f4;padding:.15rem .35rem;border-radius:4px;font-size:.9em}
+pre{background:#f4f4f4;padding:1rem;border-radius:6px;overflow-x:auto;font-size:.85em}
+pre code{background:none;padding:0}
+.step{background:#f8f9fa;border-left:4px solid #2a7ae2;padding:1rem 1.2rem;margin:1.2rem 0;border-radius:0 6px 6px 0}
+.verdict{background:#eef7ee;border-left-color:#2e7d32}
+.warn{background:#fff8e6;border-left-color:#e6a200}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}
+.badge{display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:.85em;font-weight:600}
+.badge.yes{background:#d4edda}.badge.no{background:#eee}
+video{width:100%;max-width:860px;border-radius:8px;background:#000}
+.small{color:#555;font-size:.9em}
+a{color:#2a7ae2}
+</style>
+</head>
+<body>
+
+<h1>AgentArb — sample arbitration</h1>
+<p><strong>Small-claims court for agent commerce.</strong> This page walks through a
+genuine arbitration produced by the AgentArb CLI — not a mockup. Every hash,
+rule, and verdict below is real output from a local demo run.</p>
+
+<p class="warn step"><strong>Sample data only.</strong> All identities, keys, and
+amounts are demo-generated fakes. <strong>Verdicts are advisory:</strong> AgentArb
+v1's escrow is a ledger model, not custody — it records holds, releases, and
+refunds, and moves no real money. A verdict takes effect only when a settlement
+adapter (Stripe, on-chain) honors it.</p>
+
+<h2 id="video">Explainer video</h2>
+<video controls preload="metadata" poster="">
+  <source src="agentarb-explainer.mp4" type="video/mp4">
+  Your browser does not support the video element.
+</video>
+<p class="small">60–90 seconds, captioned. The problem, the solution, and the CLI demo below.</p>
+
+<h2>1. The dispute</h2>
+<div class="step">
+<p>One agent hired another for a $100.00 job. The agreed delivery deadline
+passed, and nothing arrived. The buyer agent filed a <strong>non-delivery</strong>
+claim.</p>
+<table>
+<tr><th>Transaction</th><td><code>demo-non-delivery</code> — “Demo non-delivery dispute (fake data)”</td></tr>
+<tr><th>Amount claimed</th><td>$100.00 USD (10,000 minor units)</td></tr>
+<tr><th>Agreed delivery by</th><td>2026-10-21 (deadline passed before filing)</td></tr>
+<tr><th>Claim type</th><td><code>non-delivery</code></td></tr>
+<tr><th>Claimant</th><td><code>did:key:z6Mktkwnbd3dKEh…</code> (demo identity)</td></tr>
+<tr><th>Respondent</th><td><code>did:key:z6Mku6K4rzgFsVDA9…</code> (demo identity)</td></tr>
+</table>
+</div>
+
+<h2>2. The evidence</h2>
+<div class="step">
+<p>The claimant submitted a <strong>signed evidence bundle</strong>. Every item is
+signed with the submitter's Ed25519 <code>did:key</code> identity, and the bundle
+is content-addressed by hash — so nobody can forge someone else's proof or
+quietly edit a claim after filing.</p>
+<p>Bundle id: <code>bundle-demo-non-delivery</code><br>
+Bundle hash: <code>51eac6a2132aef546b84dda01387df78aac55366ab593e6c1ca867f6c7dea269</code></p>
+<p>Offline verification (no server needed):</p>
+<pre><code>$ agentarb verify --in bundle.json
+VALID bundle
+  hash:    51eac6a2132aef546b84dda01387df78aac55366ab593e6c1ca867f6c7dea269
+  signers: did:key:z6Mktkwnbd3dKEh3mrrRC9mKTBLyKE2f1WdDuKnSUsQnpVuo</code></pre>
+<p>For a non-delivery claim, the decisive fact is an <em>absence</em>: the bundle
+contains <strong>no delivery proof at all</strong>, and the deadline has passed.
+That absence — checked against the signed record — is what the rules decide on.</p>
+<p><strong>Not all evidence is equal.</strong> AgentArb grades evidence into trust
+tiers: an admission signed by the <em>other</em> party counts most, independent
+third-party evidence counts next, your own signed word counts less, and unsigned
+claims count least. A second demo case shows a tier in action — a
+<strong>late-delivery</strong> claim backed by an oracle-signed carrier scan
+(“Carrier scan: delivered late”), graded <strong>tier 2,
+third-party-oracle-signed</strong>, which fired the <code>delivered-late</code>
+rule and refunded the agreed $15.00 penalty. If the evidence is too weak or
+contradictory, the engine says “I don't know” and escalates to a human instead
+of guessing.</p>
+</div>
+
+<h2>3. The rule that fired</h2>
+<div class="step">
+<p>Rules are <strong>data, not code</strong> — a vendored JSONLogic engine that can
+only look at evidence, never run anything. The verdict cites the exact rule-set
+version and hash that decided it, and publishes its full reasoning trace, so
+anyone can re-check it.</p>
+<p>Rule set: <code>builtin/non-delivery</code> v1<br>
+Rule-set hash: <code>816d1f8ade90eccf5c3934a6c2d0426f75a9bc67566d0b88b061ba999ec140ab</code></p>
+<table>
+<tr><th>Rule</th><th>Matched</th><th>Why</th></tr>
+<tr><td><code>credible-delivery-exists</code></td><td><span class="badge no">no</span></td><td>Credible delivery proof exists (tier ≥ 2); the non-delivery claim fails.</td></tr>
+<tr><td><code>weak-delivery-claim</code></td><td><span class="badge no">no</span></td><td>Only weak (self-signed) delivery evidence exists; a human must weigh it.</td></tr>
+<tr><td><code>no-agreed-delivery-time</code></td><td><span class="badge no">no</span></td><td>No agreed delivery time, so non-delivery cannot be time-boxed.</td></tr>
+<tr><td><code>delivery-window-open</code></td><td><span class="badge no">no</span></td><td>The agreed delivery window is still open; the claim is premature.</td></tr>
+<tr><td><code>no-delivery-past-deadline</code></td><td><span class="badge yes">YES</span></td><td><strong>No delivery proof at all and the agreed deadline has passed.</strong></td></tr>
+</table>
+</div>
+
+<h2>4. The verdict</h2>
+<div class="step verdict">
+<p><strong>Outcome: refund in full — $100.00.</strong></p>
+<p>Verdict id: <code>v_764836278d40ebf4e3b82e87b95571529e941821564bea3dd2659a7963be9bb3</code><br>
+Method: <code>rules</code> · Decided: 2026-10-26 · Arbiter: <code>did:key:z6MkpdB9G38yr2R8…</code></p>
+<p>The verdict is itself signed (Ed25519 <code>did:key</code> JWS) and its id is
+its content address — tamper with one byte and the id stops matching. Anyone
+with the files can verify bundle and verdict offline, without trusting the
+server that issued them.</p>
+</div>
+
+<h2>5. The escrow movement</h2>
+<div class="step">
+<p>Money moves <strong>only on verdicts</strong>. Before adjudication, the
+respondent's side placed a $100.00 hold against the claim. The verdict then
+moved it — nothing moved on the claim alone, and a refund can never exceed the
+amount claimed.</p>
+<pre><code>hold_b85e250c…  hold    $100.00  → status: held
+verdict v_7648…  refund  $100.00  → hold status: refunded, remaining: $0.00</code></pre>
+<p class="small">Reminder: v1's escrow is a ledger model, not custody. These are records of
+holds, releases, and refunds that a real payment adapter settles against later
+— no real money moved here.</p>
+</div>
+
+<h2>Run it yourself</h2>
+<pre><code>npm install &amp;&amp; npm run build
+node packages/server/dist/index.js          # arbiter on 127.0.0.1:3000
+node packages/cli/dist/index.js demo --scenario non-delivery --out /tmp/demo
+node packages/cli/dist/index.js submit --server http://127.0.0.1:3000 --in /tmp/demo/bundle.json
+node packages/cli/dist/index.js adjudicate --server http://127.0.0.1:3000 --case &lt;case-id&gt;
+node packages/cli/dist/index.js verify --in /tmp/demo/bundle.json   # offline</code></pre>
+<p>Try the other scenarios too: <code>late-delivery</code> (refunds a pre-agreed
+penalty on oracle-signed proof) and <code>wrong-partial-delivery</code> (refunds
+the missing amount on credible inspection evidence).</p>
+
+<p class="small">Source: <a href="https://github.com/TamTunnel/agentarb">github.com/TamTunnel/agentarb</a>
+· Apache-2.0 · Sample arbitration generated with the AgentArb CLI, October 2026.</p>
+
+</body>
+</html>
