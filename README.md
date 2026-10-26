@@ -180,13 +180,14 @@ A second adapter accepts AgentCred task mandates as holds: the mandate
 is verified with the audited `@tamtunnel/si-wallet-core`
 `verifyMandate`, its major-unit limit must cover the hold, and
 verification consumes the mandate (single-use by design — re-submission
-fails as a replay). The adapter adds checks upstream does not: the
-mandate and grant JWS kids must equal the identities they claim
-(`kid == iss` for both, grant `sub ==` mandate `iss`) — upstream
-`verifyMandate` never binds kid to issuer, so without this an attacker
-holding only their own key could mint a victim-issued chain that
-verifies (upstream should bind kid itself; follow-up for AgentCred,
-not this repo). The mandate must be minted for audience `agentarb`,
+fails as a replay). The adapter adds checks upstream added in
+`@tamtunnel/si-wallet-core@0.1.1`: the mandate and grant JWS kids must
+equal the identities they claim (`kid == iss` for both, grant `sub ==`
+mandate `iss`). Before 0.1.1, upstream `verifyMandate` never bound kid to
+issuer, so without these checks an attacker holding only their own key
+could mint a victim-issued chain that verifies. The adapter checks are
+kept as defense in depth; AgentArb's `^0.1.0` range picks up 0.1.1
+automatically once it is on npm. The mandate must be minted for audience `agentarb`,
 its `claims.currency` must equal the hold currency, its scope must
 include `agentarb:hold`, and the major→minor conversion floors, never
 rounds up. Any agent may back a hold (guarantor model — the mandate

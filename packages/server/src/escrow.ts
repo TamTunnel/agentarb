@@ -87,15 +87,15 @@ function decodeJwsParts(
  * Adapter-side hardening beyond what si-wallet-core's verifyMandate
  * checks (chain shape, expiry, sub==iss, scope/amount narrowing, jti
  * replay):
- *   - KID BINDING (upstream gap): verifyMandate never binds a JWS kid
- *     to the identity it claims to be, so an attacker holding only their
- *     own key could mint a grant (iss=victim owner, sub=victim agent)
- *     and a mandate (iss=victim agent) that verified as the victim.
- *     This adapter requires kid-DID == iss for BOTH the mandate and the
- *     embedded grant, and re-asserts grant sub == mandate iss. These
- *     checks run BEFORE verifyMandate so a policy rejection never burns
- *     the mandate's jti in the replay ledger. Upstream si-wallet-core
- *     should bind kid itself — follow-up for AgentCred, not this repo.
+ *   - KID BINDING (closed upstream in si-wallet-core 0.1.1): verifyMandate
+ *     used to never bind a JWS kid to the identity it claims to be, so an
+ *     attacker holding only their own key could mint a grant (iss=victim
+ *     owner, sub=victim agent) and a mandate (iss=victim agent) that
+ *     verified as the victim. This adapter requires kid-DID == iss for
+ *     BOTH the mandate and the embedded grant, and re-asserts grant sub
+ *     == mandate iss. These checks run BEFORE verifyMandate so a policy
+ *     rejection never burns the mandate's jti in the replay ledger. Kept
+ *     as defense in depth now that upstream binds kid itself.
  *   - Audience: the mandate must be minted for "agentarb".
  *   - Currency: the mandate's claims.currency must equal the hold
  *     currency (a mandate without a currency claim is rejected).
